@@ -13,8 +13,12 @@ sup_name({pingers, ClusterName}) ->
     list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_pingers").
 
 % Helper: get pid of started infrastructure part
+get_pid(undefined, _) ->
+    throw(undefined_cluster);
 get_pid(ClusterName, pingers) when is_atom(ClusterName) ->
-    whereis(sup_name({pingers, ClusterName}));
+    Pid = whereis(sup_name({pingers, ClusterName})),
+    Pid == undefined andalso error(no_cluster),
+    Pid;
 get_pid(ClusterName, PartName) when is_atom(ClusterName), is_atom(PartName) ->
     Sup = sup_name({cluster, ClusterName, undefined}),
     Children = supervisor:which_children(Sup),
@@ -33,19 +37,29 @@ join_cluster(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Callba
                    permanent, 10000, supervisor, []},
     supervisor:start_child(sup_name(root), ClusterSpec).
 
+
 add_pinger(ClusterName, Node, Watcher) when is_atom(ClusterName), is_atom(Node), is_pid(Watcher) ->
-    PingersSup = whereis(sup_name({pingers, ClusterName})),
+    PingersSup = get_pid(ClusterName, pingers),
     add_pinger(PingersSup, ClusterName, Node, Watcher).
 
 add_pinger(PingersSup, ClusterName, Node, Watcher) when is_pid(PingersSup), is_atom(Node), is_pid(Watcher) ->
     PingerSpec = {Node,
                   {minishard_pinger, start_link, [ClusterName, Node, Watcher]},
                   permanent, 100, worker, [minishard_pinger]},
-    supervisor:start_child(PingersSup, PingerSpec).
+    case supervisor:start_child(PingersSup, PingerSpec) of
+        {ok, Pid} ->
+            {ok, Pid};
+        {error,{already_started,Pid}} ->
+            {ok, Pid};
+        Error ->
+            Error
+    end.
+
 
 pingers(ClusterName) when is_atom(ClusterName) ->
     pingers(get_pid(ClusterName, pingers));
 pingers(PingersSup) when is_pid(PingersSup) ->
+    erlang:is_process_alive(PingersSup) orelse throw(dead_cluster),
     Children = supervisor:which_children(PingersSup),
     [{Node, Pid} || {Node, Pid, _, _} <- Children].
 

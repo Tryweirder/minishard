@@ -1,7 +1,7 @@
 -module(minishard_watcher).
 -behavior(gen_server).
 
--export([start_link/2]).
+-export([start_link/2, current_statuses/1, get_pinger/2]).
 
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3, terminate/2]).
 
@@ -24,6 +24,18 @@ name(ClusterName) when is_atom(ClusterName) ->
 start_link(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(CallbackMod) ->
     State = seed_state(ClusterName, CallbackMod),
     gen_server:start_link({local, name(ClusterName)}, ?MODULE, State, []).
+
+get_pinger(ClusterName, Node) ->
+    Pingers = minishard_sup:pingers(ClusterName),
+    case proplists:get_value(Node, Pingers) of
+        Pid when is_pid(Pid) ->
+            Pid;
+        _ ->
+            Watcher = whereis(name(ClusterName)),
+            erlang:is_process_alive(Watcher) orelse error(no_cluster),
+            {ok, Pid} = minishard_sup:add_pinger(ClusterName, Node, Watcher),
+            Pid
+    end.
 
 
 seed_state(ClusterName, CallbackMod) ->
@@ -80,16 +92,15 @@ export_status(#watcher{status = Status} = State) ->
     State.
 
 
-poll_pingers(#watcher{pingers_sup = PingersSup, node_statuses = NodeStatuses} = State) when is_pid(PingersSup) ->
-    Pingers = minishard_sup:pingers(PingersSup),
-    SeenNodes = maps:keys(NodeStatuses),
-    PingedNodes = [N || {N, _} <- Pingers],
+poll_pingers(#watcher{pingers_sup = PingersSup, node_statuses = PrevStatuses} = State) when is_pid(PingersSup) ->
+    RefreshedStatuses = current_statuses(PingersSup),
+
+    SeenNodes = maps:keys(PrevStatuses),
+    PingedNodes = maps:keys(RefreshedStatuses),
 
     UnpingedNodes = SeenNodes -- PingedNodes,
     _NewPingers = [{N, new_pinger(N, State)} || N <- UnpingedNodes],
     ZeroStatuses = maps:from_list([{N, undefined} || N <- UnpingedNodes]),
-
-    RefreshedStatuses = maps:from_list([{N, poll_status(Pid)} || {N, Pid} <- Pingers]),
 
     NewStatuses = maps:merge(ZeroStatuses, RefreshedStatuses),
     State#watcher{node_statuses = NewStatuses};
@@ -103,6 +114,10 @@ new_pinger(Node, #watcher{pingers_sup = PingersSup, cluster_name = ClusterName})
     {ok, Pinger} = minishard_sup:add_pinger(PingersSup, ClusterName, Node, self()),
     Pinger.
 
+
+current_statuses(Cluster) ->
+    Pingers = minishard_sup:pingers(Cluster),
+    maps:from_list([{N, poll_status(Pid)} || {N, Pid} <- Pingers]).
 
 poll_status(Pid) when is_pid(Pid) ->
     minishard_pinger:status(Pid).
