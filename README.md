@@ -1,4 +1,4 @@
-Minishard — lightweigth sharding for distributed Erlang applications
+Minishard — lightweight sharding for distributed Erlang applications
 =======
 
 Goal
@@ -34,7 +34,7 @@ Any actions needed to initialize a shard should be performed in this function.
 ```State``` is any term you want, it will be passed to other callbacks.
 
 When conflict occurs minishard decides which shard instance should be shut down. To do that each instance is queried for its score by calling ```CallbackMod:score(State) -> integer()```.
-Instance with highest score is a winner and keeps its allocation. Loser is deallocated. Corresponding callbacks are caled:
+Instance with the highest score is a winner and remains allocated. Loser is deallocated. Corresponding callbacks are called:
   * ```CallbackMod:prolonged(LoserPid, State) -> {ok, NewState}```
   * ```CallbackMod:deallocated(WinnerPid, State) -> any()``` — final cleanup, return value is ignored. If deallocation is done due to cluster degradation or shutdown, ```WinnerPid``` is ```undefined```.
 
@@ -43,13 +43,13 @@ If you need a complex migration algorithm, implement it yourself by calling e.g.
 Watcher details
 -----------
 For cluster monitoring we need every node to be continiously checked. For each node a pinger is started.
-Running pinger keeps node status in its process dictionary (for quick lock-less querying).
+A running pinger keeps node status in its process dictionary (for quick lock-less querying).
 When started, pinger sets status to ```unavailable``` and pings the target node.
 If ping is successful, the status changes to ```node_up```, and pinger sets a monitor for this node.
 Now it's time to check if node is part of the same minishard cluster by checking if corresponging processes exist. After this check status becomes one of ```not_my_cluster``` or ```available```.
-For available node a monitor on shard manager (or reverse pinger?) is set.
+For available node a monitor on reverse pinger is set.
 
-After that pinger starts simple periodic check of remote process. Depending on check result or incoming monitor messages the status may degrade to ```unavailable``` or ```node_up```.
+After that the pinger starts simple periodic check of remote process. Depending on a check result or incoming monitor messages the status may degrade to ```unavailable``` or ```node_up```.
 
 Pinger notifies his watcher about every status change.
 
