@@ -1,4 +1,4 @@
 PROJECT = minishard
 NID := 1
-SHELL_OPTS = -sname minishard$(NID) -setcookie minishard_demo
+SHELL_OPTS = -sname minishard$(NID) -setcookie minishard_demo -s minishard
 include erlang.mk
