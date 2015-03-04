@@ -96,7 +96,8 @@ schedule_check(#pinger{status = Status, timer = OldTimer} = State) ->
     Timer = erlang:start_timer(Timeout, self(), Check),
     State#pinger{timer = Timer}.
 
-export_status(#pinger{status = Status} = State) ->
+export_status(#pinger{status = Status, watcher = Watcher, node = Node} = State) ->
+    minishard_watcher:notify_node_status(Watcher, Node, Status),
     put(status, Status),
     State.
 
