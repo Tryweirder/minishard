@@ -1,7 +1,7 @@
 -module(minishard_watcher).
 -behavior(gen_server).
 
--export([start_link/2, status/1, current_statuses/1, get_pinger/2, notify_node_status/3]).
+-export([start_link/2, name/1, status/1, current_statuses/1, get_pinger/2, notify_node_status/3]).
 
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3, terminate/2]).
 
@@ -128,6 +128,7 @@ set_poll_timer(#watcher{poll_timer = undefined} = State) ->
 export_status(#watcher{cluster_name = ClusterName, status = Status} = State) ->
     error_logger:info_msg("Minishard watcher ~w changed status to ~w", [ClusterName, Status]),
     put(status, Status),
+    minishard_shard:notify_cluster_status(ClusterName, Status),
     State.
 
 

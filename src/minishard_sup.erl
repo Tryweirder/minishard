@@ -16,9 +16,11 @@ sup_name({pingers, ClusterName}) ->
 get_pid(undefined, _) ->
     throw(undefined_cluster);
 get_pid(ClusterName, pingers) when is_atom(ClusterName) ->
-    Pid = whereis(sup_name({pingers, ClusterName})),
-    Pid == undefined andalso error(no_cluster),
-    Pid;
+    strict_whereis(sup_name({pingers, ClusterName}));
+get_pid(ClusterName, watcher) when is_atom(ClusterName) ->
+    strict_whereis(minishard_watcher:name(ClusterName));
+get_pid(ClusterName, shard) when is_atom(ClusterName) ->
+    strict_whereis(minishard_shard:name(ClusterName));
 get_pid(ClusterName, PartName) when is_atom(ClusterName), is_atom(PartName) ->
     Sup = sup_name({cluster, ClusterName, undefined}),
     Children = supervisor:which_children(Sup),
@@ -27,6 +29,10 @@ get_pid(ClusterName, PartName) when is_atom(ClusterName), is_atom(PartName) ->
         false -> undefined
     end.
 
+strict_whereis(ProcessName) when is_atom(ProcessName) ->
+    Pid = whereis(ProcessName),
+    Pid == undefined andalso error(no_cluster),
+    Pid.
 
 start_link(Arg) ->
 	supervisor:start_link({local, sup_name(Arg)}, ?MODULE, Arg).
@@ -73,8 +79,11 @@ init({cluster, ClusterName, CallbackMod}) ->
     PingersSpec = {pingers,
                    {?MODULE, start_link, [{pingers, ClusterName}]},
                    permanent, 1000, supervisor, []},
+    ShardSpec = {shard,
+                 {minishard_shard, start_link, [ClusterName, CallbackMod]},
+                   permanent, 1000, worker, [minishard_shard]},
 
-    {ok, {{one_for_all, 1, 5}, [WatcherSpec, PingersSpec]}};
+    {ok, {{one_for_all, 1, 5}, [WatcherSpec, PingersSpec, ShardSpec]}};
 
 init({pingers, _}) ->
     {ok, {{one_for_one, 1, 5}, []}}.
