@@ -35,7 +35,7 @@ strict_whereis(ProcessName) when is_atom(ProcessName) ->
     Pid.
 
 start_link(Arg) ->
-	supervisor:start_link({local, sup_name(Arg)}, ?MODULE, Arg).
+    supervisor:start_link({local, sup_name(Arg)}, ?MODULE, Arg).
 
 join_cluster(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(CallbackMod) ->
     ClusterSpec = {ClusterName,

@@ -13,7 +13,7 @@ start() ->
 
 
 start(_Type, _Args) ->
-	minishard_sup:start_link(root).
+    minishard_sup:start_link(root).
 
 stop(_State) ->
-	ok.
+    ok.
