@@ -15,7 +15,7 @@ How minishard is supposed to work
 -----------
 Minishard node is started with two arguments: ```ClusterName :: atom()``` and ```CallbackMod :: module()```.
 
-Before joining the cluster we first need to know the list of nodes it is constructed of. This is done by calling ```CallbackMod:nodes(ClusterName) -> [node()]```.
+Before joining the cluster we first need to know the list of nodes it is constructed of. This is done by calling ```CallbackMod:cluster_nodes(ClusterName) -> [node()]```.
 
 Also minishard gets the number of required shards by calling ```CallbackMod:shard_count(ClusterName) -> integer()```.
 

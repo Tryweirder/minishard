@@ -58,7 +58,7 @@ seed_state(ClusterName, CallbackMod) ->
     ShardCount = CallbackMod:shard_count(ClusterName),
     is_integer(ShardCount) orelse error({bad_shard_count, ShardCount}),
     % Get cluster nodes and make initial status map
-    Nodes = CallbackMod:nodes(ClusterName),
+    Nodes = CallbackMod:cluster_nodes(ClusterName),
     NStatuses = maps:from_list([{Node, undefined} || Node <- Nodes]),
     % Ensure we have enough possible nodes to host all shards
     (ShardCount =< length(Nodes)) orelse error({too_few_nodes, length(Nodes)}),
