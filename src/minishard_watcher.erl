@@ -100,8 +100,11 @@ handle_info(Unexpected, #watcher{cluster_name = ClusterName} = State) ->
 handle_cast({node_status, Node, Status}, #watcher{} = State) ->
     NewState = save_node_status(Node, Status, State),
     {noreply, check_status(NewState)};
-handle_cast(_, #watcher{} = State) ->
+
+handle_cast(Unexpected, #watcher{cluster_name = ClusterName} = State) ->
+    error_logger:warning_msg("Minishard watcher ~w got unexpected cast: ~9999p", [ClusterName, Unexpected]),
     {noreply, State}.
+
 
 handle_call(_, _From, #watcher{} = State) ->
     Response = {error, not_implemented},
