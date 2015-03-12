@@ -6,6 +6,8 @@
 %% gen_server callbacks
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3, terminate/2]).
 
+%% global conflict resolver
+-export([resolve_conflict/3]).
 
 name(ClusterName) when is_atom(ClusterName) ->
     list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_shard").
@@ -56,6 +58,7 @@ allocated_node(ClusterName, Num) ->
         max_number,
         my_number,
         monitors,
+        recheck_timer,
         status
         }).
 
@@ -93,15 +96,34 @@ handle_info({'DOWN', MonRef, process, _Pid, _Reason}, #shard{monitors = Mons, st
         ShardNum when is_integer(ShardNum) -> % Ok, now we should try to register as a failed shard
             try_failover(ShardNum, State)
     end,
-    {noreply, NewState}.
+    {noreply, NewState};
+
+handle_info({timeout, Timer, recheck_ownership}, #shard{recheck_timer = Timer} = State) ->
+    handle_ownership_recheck(State#shard{recheck_timer = undefined});
+
+handle_info(Unexpected, #shard{cluster_name = ClusterName} = State) ->
+    error_logger:warning_msg("Minishard shard ~w got unexpected message: ~9999p", [ClusterName, Unexpected]),
+    {noreply, State}.
+
+
+handle_call(score, _From, #shard{status = active, callback_mod = CallbackMod, callback_state = CallbackState} = State) ->
+    Score = CallbackMod:score(CallbackState),
+    {reply, Score, State};
 
 handle_call(_, _From, #shard{} = State) ->
     {reply, {error, not_implemented}, State}.
 
+
 handle_cast({cluster_status, Status}, #shard{} = State) ->
     handle_cluster_status(Status, State);
-handle_cast(_, #shard{} = State) ->
+
+handle_cast({allocation, Action, Challenger}, #shard{} = State) ->
+    handle_allocation(Action, Challenger, State);
+
+handle_cast(Unexpected, #shard{cluster_name = ClusterName} = State) ->
+    error_logger:warning_msg("Minishard shard ~w got unexpected cast: ~9999p", [ClusterName, Unexpected]),
     {noreply, State}.
+
 
 code_change(_, #shard{} = State, _) ->
     {ok, State}.
@@ -115,12 +137,36 @@ handle_cluster_status(available, #shard{} = State) ->
     % Wheeeeeeeeee!!!!
     {noreply, join_cluster(State)};
 handle_cluster_status(degraded, #shard{} = State) ->
-    % Gracefully shutdown for cleanup
-    {stop, {shutdown, cluster_degraded}, idle(State)};
+    % Cancel allocation with undefined winner
+    handle_allocation(cancel, undefined, State);
 handle_cluster_status(transition, #shard{} = State) ->
     % Do nothing during transition
     {noreply, State}.
 
+
+%% Allocation notification on conflict
+handle_allocation(prolong, Loser, #shard{} = State) ->
+    {noreply, callback_prolong(Loser, State)};
+handle_allocation(cancel, Winner, #shard{} = State) ->
+    NewState = callback_deallocate(Winner, State),
+    % Gracefully shutdown for cleanup
+    {stop, {shutdown, cluster_degraded}, idle(NewState)}.
+
+
+%% Shard ownership recheck
+handle_ownership_recheck(#shard{status = active, cluster_name = ClusterName, my_number = MyNum} = State) ->
+    Owner = global:whereis_name(global_name(ClusterName, MyNum)),
+    case (Owner == self()) of
+        true -> % OK, we still own the shard
+            {noreply, schedule_recheck(State)};
+        false -> %% Oops...
+            error_logger:error_msg("Minishard: cluster ~w shard #~w ownership lost! This could be some bug in global", [ClusterName, MyNum]),
+            handle_allocation(cancel, undefined, State)
+    end;
+handle_ownership_recheck(#shard{} = State) ->
+    {noreply, State}.
+
+    
 
 %%%
 %%% Internals
@@ -130,6 +176,20 @@ export_status(#shard{status = Status} = State) ->
     put(status, Status),
     State.
 
+
+%% Try to take failed shard
+try_failover(ShardNum, #shard{cluster_name = ClusterName, monitors = MonMap} = State) ->
+    case register_or_monitor(ClusterName, [ShardNum]) of
+        {registered, ShardNum} ->
+            _ = demonitor_all(MonMap),
+            activate(ShardNum, State);
+        {monitored, MonPatch} ->
+            NewMonMap = maps:merge(MonMap, MonPatch),
+            State#shard{monitors = NewMonMap}
+    end.
+
+
+%% Try to join a cluster and take a free shard if possible
 join_cluster(#shard{status = standby} = State) ->
     % Already waiting for free shard number. This may happen after transition
     State;
@@ -139,15 +199,21 @@ join_cluster(#shard{status = active} = State) ->
 join_cluster(#shard{status = idle, cluster_name = ClusterName, max_number = MaxNumber} = State) ->
     ok = global:sync(), % Ensure we have fresh shard map
     AllShardNums = lists:seq(1, MaxNumber),
-    NewState = case register_or_monitor(ClusterName, AllShardNums) of
+    case register_or_monitor(ClusterName, AllShardNums) of
         {registered, MyNumber} ->
-            State#shard{status = active, my_number = MyNumber};
+            activate(MyNumber, State);
         {monitored, Monitors} ->
-            State#shard{status = standby, my_number = undefined, monitors = Monitors}
-    end,
-    export_status(NewState).
+            export_status(State#shard{status = standby, my_number = undefined, monitors = Monitors})
+    end.
+
+%% Perform all activation stuff when we capture a shard number
+activate(MyNumber, #shard{} = State) ->
+    Allocated = callback_allocate(State#shard{status = active, my_number = MyNumber}),
+    RecheckScheduled = schedule_recheck(Allocated),
+    export_status(RecheckScheduled).
 
 
+%% Leave degraded cluster
 idle(#shard{status = idle} = State) ->
     % Nothing to do
     State;
@@ -155,8 +221,27 @@ idle(#shard{status = standby, monitors = Monitors} = State) ->
     demonitor_all(Monitors),
     export_status(State#shard{status = idle, monitors = #{}});
 idle(#shard{status = active} = State) ->
-    % TODO: shut down user code
     export_status(State#shard{status = idle, my_number = undefined}).
+
+
+%% Due to some troubles global has after netsplit, we need to periodically ensure we still own the shard number
+schedule_recheck(#shard{} = State) ->
+    Timer = erlang:start_timer(100, self(), recheck_ownership),
+    State#shard{recheck_timer = Timer}.
+
+
+%% Callback management
+callback_allocate(#shard{cluster_name = ClusterName, callback_mod = CallbackMod, my_number = MyNumber} = State) ->
+    {ok, CallbackState} = CallbackMod:allocated(ClusterName, MyNumber),
+    State#shard{callback_state = CallbackState}.
+
+callback_prolong(Loser, #shard{callback_mod = CallbackMod, callback_state = CallbackState} = State) ->
+    {ok, NewCallbackState} = CallbackMod:prolonged(Loser, CallbackState),
+    State#shard{callback_state = NewCallbackState}.
+
+callback_deallocate(Winner, #shard{callback_mod = CallbackMod, callback_state = CallbackState} = State) ->
+    _ = CallbackMod:deallocated(Winner, CallbackState),
+    State#shard{callback_state = undefined}.
 
 
 %% Resolve key by value
@@ -169,18 +254,6 @@ which_shard_failed(MonRef, MonMap) ->
 %% Helper for Value-Key resolver
 cons_if(false, _Hd, Tail) -> Tail;
 cons_if(true, Hd, Tail) -> [Hd|Tail].
-
-
-%% Try to take failed shard
-try_failover(ShardNum, #shard{cluster_name = ClusterName, monitors = MonMap} = State) ->
-    case register_or_monitor(ClusterName, [ShardNum]) of
-        {registered, ShardNum} ->
-            _ = demonitor_all(MonMap),
-            export_status(State#shard{status = active, my_number = ShardNum});
-        {monitored, MonPatch} ->
-            NewMonMap = maps:merge(MonMap, MonPatch),
-            State#shard{monitors = NewMonMap}
-    end.
 
 
 register_or_monitor(ClusterName, AllShardNums) ->
@@ -205,7 +278,46 @@ register_or_monitor(ClusterName, [Num | ShardNums], PidMap) ->
 
 
 demonitor_all(Monitors) ->
-    _ = maps:map(fun(_N, MonRef) -> erlang:demonitor(MonRef) end, Monitors),
+    _ = maps:map(fun(_N, MonRef) -> erlang:demonitor(MonRef, [flush]) end, Monitors),
     ok.
 
+
+
+
+%% This function is called when two shard managers are registered with one shard number
+%% Here we ask both for their score, choose which of them should be terminated and send notifications
+resolve_conflict(Name, Shard1, Shard2) ->
+    Score1 = get_score_or_kill(Shard1),
+    Score2 = is_integer(Score1) andalso get_score_or_kill(Shard2),
+    if
+        is_integer(Score1) andalso is_integer(Score2) ->
+            error_logger:warning_msg("minishard conflict resolution for name ~w: ~w (score ~w) vs ~w (score ~w)", [Name, node(Shard1), Score1, node(Shard2), Score2]),
+            select_conflict_winner(Score1 >= Score2, Shard1, Shard2);
+        is_integer(Score1) ->
+            Shard1;
+        true ->
+            Shard2
+    end.
+
+%% We perform score getting in separate process to ensure global manager does not get garbage messages
+get_score_or_kill(ShardPid) ->
+    ScoreGetResult = rpc:call(node(), gen_server, call, [ShardPid, score, 1000]),
+    if
+        is_integer(ScoreGetResult) ->
+            ScoreGetResult;
+        true ->
+            % We don't care what exactly goes wrong, we just kill it
+            exit(ShardPid, kill),
+            undefined
+    end.
+
+
+select_conflict_winner(false, Loser, Winner) ->
+    select_conflict_winner(true, Winner, Loser);
+select_conflict_winner(true, Winner, Loser) ->
+    % Notify both parties of our decision
+    gen_server:cast(Winner, {allocation, prolong, Loser}),
+    gen_server:cast(Loser, {allocation, cancel, Winner}),
+    % global expect us to return the winner pid
+    Winner.
 
