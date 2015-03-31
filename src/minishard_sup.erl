@@ -83,8 +83,8 @@ init({cluster, ClusterName, CallbackMod}) ->
                  {minishard_shard, start_link, [ClusterName, CallbackMod]},
                    permanent, 1000, worker, [minishard_shard]},
 
-    {ok, {{one_for_all, 1, 5}, [WatcherSpec, PingersSpec, ShardSpec]}};
+    {ok, {{one_for_all, 5, 10}, [WatcherSpec, PingersSpec, ShardSpec]}};
 
 init({pingers, _}) ->
-    {ok, {{one_for_one, 1, 5}, []}}.
+    {ok, {{one_for_one, 5, 5}, []}}.
 
