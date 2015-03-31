@@ -13,6 +13,8 @@
 
 % API
 -export([start/0]).
+-export([join/2, get_node/2, get_manager/2]).
+-export([status/2]).
 
 % Application callbacks
 -export([start/2, stop/1]).
@@ -27,3 +29,28 @@ start(_Type, _Args) ->
 
 stop(_State) ->
     ok.
+
+
+%% Join the cluster
+join(ClusterName, CallbackMod) ->
+    minishard_sup:join_cluster(ClusterName, CallbackMod).
+
+%% Resolve a shard number to the shard manager pid
+get_manager(ClusterName, ShardNum) ->
+    minishard_shard:manager_pid(ClusterName, ShardNum).
+
+%% Resolve a shard number to the node currently hosting it
+get_node(ClusterName, ShardNum) ->
+    minishard_shard:allocated_node(ClusterName, ShardNum).
+
+%% Cluster status
+%% TODO: store CallbackMod and do not require user to provide it
+status(ClusterName, CallbackMod) ->
+    ClusterStatus = minishard_watcher:status(ClusterName),
+    NodeStatuses = minishard_watcher:current_statuses(ClusterName),
+    AllocationMap = minishard_shard:allocation_map(ClusterName, CallbackMod),
+    NodeStatusMap = maps:fold(fun allocation_to_node_status/3, NodeStatuses, AllocationMap),
+    {ClusterStatus, NodeStatusMap}.
+
+allocation_to_node_status(ShardNum, ShardNode, NodeStatuses) ->
+    maps:put(ShardNode, {active, ShardNum}, NodeStatuses).

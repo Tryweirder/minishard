@@ -2,6 +2,7 @@
 -behavior(gen_server).
 
 -export([start_link/2, name/1, status/1, notify_cluster_status/2, allocation_map/2]).
+-export([manager_pid/2, allocated_node/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3, terminate/2]).
@@ -43,8 +44,11 @@ allocation_map(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Call
     AllShardNums = lists:seq(1, MaxNum),
     maps:from_list([{N, allocated_node(ClusterName, N)} || N <- AllShardNums]).
 
+manager_pid(ClusterName, Num) when is_atom(ClusterName), is_integer(Num) ->
+    global:whereis_name(global_name(ClusterName, Num)).
+
 allocated_node(ClusterName, Num) ->
-    case global:whereis_name(global_name(ClusterName, Num)) of
+    case manager_pid(ClusterName, Num) of
         undefined ->
             undefined;
         Pid when is_pid(Pid) ->
@@ -155,7 +159,7 @@ handle_allocation(cancel, Winner, #shard{} = State) ->
 
 %% Shard ownership recheck
 handle_ownership_recheck(#shard{status = active, cluster_name = ClusterName, my_number = MyNum} = State) ->
-    Owner = global:whereis_name(global_name(ClusterName, MyNum)),
+    Owner = manager_pid(ClusterName, MyNum),
     case (Owner == self()) of
         true -> % OK, we still own the shard
             {noreply, schedule_recheck(State)};
