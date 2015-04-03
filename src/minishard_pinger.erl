@@ -6,7 +6,7 @@
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3, terminate/2]).
 
 name(ClusterName, Node) ->
-    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_" ++ atom_to_list(Node) ++ "_watcher").
+    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_" ++ atom_to_list(Node) ++ "_pinger").
 
 start_link(ClusterName, Node, Watcher) when is_atom(ClusterName), is_atom(Node), is_pid(Watcher) ->
     State = seed_state(ClusterName, Node, Watcher),
