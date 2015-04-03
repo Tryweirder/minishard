@@ -10,7 +10,9 @@ sup_name(root) ->
 sup_name({cluster, ClusterName, _}) ->
     list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_sup");
 sup_name({pingers, ClusterName}) ->
-    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_pingers").
+    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_pingers");
+sup_name({pinger_guard, ClusterName, Node, _}) ->
+    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_pguard_" ++ atom_to_list(Node)).
 
 % Helper: get pid of started infrastructure part
 get_pid(undefined, _) ->
@@ -44,15 +46,16 @@ join_cluster(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Callba
     supervisor:start_child(sup_name(root), ClusterSpec).
 
 
+%% Insert a new pinger into the pingers sup
 add_pinger(ClusterName, Node, Watcher) when is_atom(ClusterName), is_atom(Node), is_pid(Watcher) ->
     PingersSup = get_pid(ClusterName, pingers),
     add_pinger(PingersSup, ClusterName, Node, Watcher).
 
 add_pinger(PingersSup, ClusterName, Node, Watcher) when is_pid(PingersSup), is_atom(Node), is_pid(Watcher) ->
-    PingerSpec = {Node,
-                  {minishard_pinger, start_link, [ClusterName, Node, Watcher]},
-                  permanent, 100, worker, [minishard_pinger]},
-    case supervisor:start_child(PingersSup, PingerSpec) of
+    PingerSupSpec = {Node,
+                     {?MODULE, start_link, [{pinger_guard, ClusterName, Node, Watcher}]},
+                     permanent, 150, supervisor, []},
+    case supervisor:start_child(PingersSup, PingerSupSpec) of
         {ok, Pid} ->
             {ok, Pid};
         {error,{already_started,Pid}} ->
@@ -67,7 +70,18 @@ pingers(ClusterName) when is_atom(ClusterName) ->
 pingers(PingersSup) when is_pid(PingersSup) ->
     erlang:is_process_alive(PingersSup) orelse throw(dead_cluster),
     Children = supervisor:which_children(PingersSup),
-    [{Node, Pid} || {Node, Pid, _, _} <- Children].
+    ValidPingers = [{Node, extract_pinger(PingersSup, Node, GuardPid)} || {Node, GuardPid, _, _} <- Children],
+    lists:filter(fun({_, Pid}) -> is_pid(Pid) end, ValidPingers).
+
+extract_pinger(PingersSup, Node, GuardPid) ->
+    case supervisor:which_children(GuardPid) of
+        [{_, Pid, _, _}] ->
+            Pid;
+        _ ->
+            supervisor:terminate_child(PingersSup, Node),
+            supervisor:delete_child(PingersSup, Node),
+            undefined
+    end.
 
 init(root) ->
     {ok, {{one_for_one, 1, 5}, []}};
@@ -86,5 +100,10 @@ init({cluster, ClusterName, CallbackMod}) ->
     {ok, {{one_for_all, 5, 10}, [WatcherSpec, PingersSpec, ShardSpec]}};
 
 init({pingers, _}) ->
-    {ok, {{one_for_one, 5, 5}, []}}.
+    {ok, {{one_for_one, 5, 5}, []}};
 
+init({pinger_guard, ClusterName, Node, Watcher}) ->
+    PingerSpec = {Node,
+                  {minishard_pinger, start_link, [ClusterName, Node, Watcher]},
+                  permanent, 100, worker, [minishard_pinger]},
+    {ok, {{one_for_all, 5, 1}, [PingerSpec]}}.
