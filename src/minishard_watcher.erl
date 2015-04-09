@@ -29,16 +29,7 @@ start_link(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Callback
     gen_server:start_link({local, name(ClusterName)}, ?MODULE, State, []).
 
 get_pinger(ClusterName, Node) ->
-    Pingers = minishard_sup:pingers(ClusterName),
-    case proplists:get_value(Node, Pingers) of
-        Pid when is_pid(Pid) ->
-            Pid;
-        _ ->
-            Watcher = whereis(name(ClusterName)),
-            erlang:is_process_alive(Watcher) orelse error(no_cluster),
-            {ok, Pid} = minishard_sup:add_pinger(ClusterName, Node, Watcher),
-            Pid
-    end.
+    gen_server:call(name(ClusterName), {get_pinger, Node}).
 
 status(ClusterName) when is_atom(ClusterName), ClusterName /= undefined ->
     Watcher = whereis(name(ClusterName)),
@@ -105,6 +96,22 @@ handle_cast(Unexpected, #watcher{cluster_name = ClusterName} = State) ->
     error_logger:warning_msg("Minishard watcher ~w got unexpected cast: ~9999p", [ClusterName, Unexpected]),
     {noreply, State}.
 
+
+%% Someone wants to add a pinger. If requested node belongs our cluster, ensure pinger is started. Return our own pid otherwise
+handle_call({get_pinger, Node}, _From, #watcher{callback_mod = CallbackMod, cluster_name = ClusterName} = State) ->
+    ClusterNodes = CallbackMod:cluster_nodes(ClusterName),
+    {Response, NewState} = case lists:member(Node, ClusterNodes) of
+        true ->
+            % First, ensure pingers sup is resolved
+            StatePolled = poll_pingers(State),
+            % Then just add a missing pinger if needed
+            Pinger = new_pinger(Node, StatePolled),
+            {Pinger, StatePolled};
+        false ->
+            % Special case for alien nodes
+            {{alien, self()}, State}
+    end,
+    {reply, Response, NewState};
 
 handle_call(_, _From, #watcher{} = State) ->
     Response = {error, not_implemented},

@@ -87,6 +87,7 @@ post_action(#pinger{watchdog = OldWD} = State) ->
 select_timer(undefined)      -> {0, node_check};
 select_timer(node_up)        -> {0, cluster_check};
 select_timer(available)      -> {1000, cluster_recheck};
+select_timer(i_am_alien)     -> {1000, cluster_recheck};
 select_timer(unavailable)    -> {1000, node_check};
 select_timer(not_my_cluster) -> {1000, cluster_check}.
 
@@ -116,15 +117,17 @@ run_check(ClusterCheck, #pinger{cluster_name = ClusterName, node = Node} = State
         when ClusterCheck == cluster_check; ClusterCheck == cluster_recheck ->
     case rpc:call(Node, minishard_watcher, get_pinger, [ClusterName, node()]) of
         Pid when is_pid(Pid) ->
-            cluster_check_succeeded(ClusterCheck, Pid, State);
+            cluster_check_succeeded(ClusterCheck, available, Pid, State);
+        {alien, ManagerPid} ->
+            cluster_check_succeeded(ClusterCheck, i_am_alien, ManagerPid, State);
         {badrpc,nodedown} ->
             State#pinger{status = unavailable};
         {badrpc, _} ->
             State#pinger{status = not_my_cluster}
     end.
 
-cluster_check_succeeded(cluster_check, Pid, #pinger{} = State) ->
+cluster_check_succeeded(cluster_check, NewStatus, Pid, #pinger{} = State) ->
     Mon = erlang:monitor(process, Pid),
-    State#pinger{status = available, cluster_mon = Mon};
-cluster_check_succeeded(cluster_recheck, _Pid, #pinger{} = State) ->
-    State#pinger{status = available}.
+    State#pinger{status = NewStatus, cluster_mon = Mon};
+cluster_check_succeeded(cluster_recheck, NewStatus, _Pid, #pinger{} = State) ->
+    State#pinger{status = NewStatus}.
