@@ -84,7 +84,11 @@ extract_pinger(PingersSup, Node, GuardPid) ->
     end.
 
 init(root) ->
-    {ok, {{one_for_one, 1, 5}, []}};
+    GFixerSpec = {global_fixer,
+                  {minishard_global_fixer, start_link, []},
+                  permanent, 1000, worker, [minishard_global_fixer]},
+
+    {ok, {{one_for_one, 1, 5}, [GFixerSpec]}};
 
 init({cluster, ClusterName, CallbackMod}) ->
     WatcherSpec = {watcher,
