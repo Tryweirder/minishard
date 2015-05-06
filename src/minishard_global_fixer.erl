@@ -76,7 +76,7 @@ fix_global_server() ->
     % Construct list of potentially problem nodes
     Unsynced = Known -- Synced,
     % Force disconnect on them, causing global to re-sync
-    error_logger:error("Minishard global fixer: sync timed out, resetting connections to nodes: ~9999p", [Unsynced]),
+    error_logger:error_msg("Minishard global fixer: sync timed out, resetting connections to nodes: ~9999p", [Unsynced]),
     [erlang:disconnect_node(N) || N <- Unsynced],
     check_repaired_global_server(Synced).
 
@@ -86,7 +86,7 @@ check_repaired_global_server(OldSyncedNodes) ->
             ok;
         {badrpc, timeout} ->
             % Something went wrong, so disconnect also nodes that were initially synced
-            error_logger:error("Minishard global fixer: second sync timed out, resetting connections to nodes: ~9999p", [OldSyncedNodes]),
+            error_logger:error_msg("Minishard global fixer: second sync timed out, resetting connections to nodes: ~9999p", [OldSyncedNodes]),
             [erlang:disconnect_node(N) || N <- OldSyncedNodes],
             % Ensure everything is OK now or retry
             check_global_server()
