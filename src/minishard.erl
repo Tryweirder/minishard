@@ -46,11 +46,22 @@ get_node(ClusterName, ShardNum) ->
 %% Cluster status
 %% TODO: store CallbackMod and do not require user to provide it
 status(ClusterName, CallbackMod) ->
-    ClusterStatus = minishard_watcher:status(ClusterName),
+    NodesStatus = minishard_watcher:status(ClusterName),
     NodeStatuses = minishard_watcher:current_statuses(ClusterName),
     AllocationMap = minishard_shard:allocation_map(ClusterName, CallbackMod),
     NodeStatusMap = maps:fold(fun allocation_to_node_status/3, NodeStatuses, AllocationMap),
+    ClusterStatus = case {NodesStatus, all_shards_allocated(AllocationMap)} of
+        {available, false} -> % Enough nodes available, but not all shards allocated
+            allocation_pending;
+        {_, _} ->
+            NodesStatus
+    end,
     {ClusterStatus, NodeStatusMap}.
 
+allocation_to_node_status(ShardNum, undefined, NodeStatuses) ->
+    maps:put({not_allocated, ShardNum}, undefined, NodeStatuses);
 allocation_to_node_status(ShardNum, ShardNode, NodeStatuses) ->
     maps:put(ShardNode, {active, ShardNum}, NodeStatuses).
+
+all_shards_allocated(AllocationMap) ->
+    not lists:member(undefined, maps:values(AllocationMap)).

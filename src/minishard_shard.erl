@@ -1,7 +1,7 @@
 -module(minishard_shard).
 -behavior(gen_server).
 
--export([start_link/2, name/1, status/1, notify_cluster_status/2, allocation_map/2]).
+-export([start_link/2, name/1, status/1, info/1, notify_cluster_status/2, allocation_map/2]).
 -export([manager_pid/2, allocated_node/2]).
 
 %% gen_server callbacks
@@ -23,13 +23,21 @@ start_link(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Callback
 
 
 %% Get shard status
-status(ClusterName) when is_atom(ClusterName), ClusterName /= undefined ->
-    Shard = whereis(name(ClusterName)),
-    status(Shard);
-
-status(Shard) when is_pid(Shard) ->
-    {dictionary, Dict} = process_info(Shard, dictionary),
+status(ClusterOrShard) when ClusterOrShard /= undefined ->
+    {dictionary, Dict} = process_info(local_pid(ClusterOrShard), dictionary),
     proplists:get_value(status, Dict, undefined).
+
+info(ClusterOrShard) when ClusterOrShard /= undefined ->
+    {dictionary, Dict} = process_info(local_pid(ClusterOrShard), dictionary),
+    case proplists:get_value(status, Dict, undefined) of
+        active ->
+            {active, #{
+                    since => proplists:get_value(active_since, Dict),
+                    shard => proplists:get_value(shard, Dict)
+                    }};
+        Inactive ->
+            {Inactive, #{}}
+    end.
 
 
 %% Notify about cluster status change. This may make the shard manager to capture some shard or to shutdown
@@ -44,6 +52,13 @@ allocation_map(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Call
     AllShardNums = lists:seq(1, MaxNum),
     maps:from_list([{N, allocated_node(ClusterName, N)} || N <- AllShardNums]).
 
+local_pid(ManagerPid) when is_pid(ManagerPid) ->
+    ManagerPid;
+local_pid(ClusterName) when is_atom(ClusterName), ClusterName /= undefined ->
+    manager_pid(ClusterName, local).
+
+manager_pid(ClusterName, local) when is_atom(ClusterName), ClusterName /= undefined ->
+    whereis(name(ClusterName));
 manager_pid(ClusterName, Num) when is_atom(ClusterName), is_integer(Num) ->
     global:whereis_name(global_name(ClusterName, Num)).
 
@@ -176,8 +191,15 @@ handle_ownership_recheck(#shard{} = State) ->
 %%% Internals
 %%%
 
+export_status(#shard{status = active = Status, my_number = MyNum} = State) ->
+    put(shard, MyNum),
+    put(active_since, os:timestamp()),
+    put(status, Status),
+    State;
 export_status(#shard{status = Status} = State) ->
     put(status, Status),
+    erase(active_since),
+    erase(shard),
     State.
 
 
