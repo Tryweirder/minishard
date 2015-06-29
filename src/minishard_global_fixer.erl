@@ -9,6 +9,8 @@
 %% main logic for calling by user
 -export([check_global_server/0]).
 
+-define(SYNC_TIMEOUT, 5000).
+
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, seed_state(), []).
 
@@ -62,7 +64,7 @@ set_check_timer(#gfixer{check_interval = Interval} = State) ->
 
 %% Perform all the checks
 check_global_server() ->
-    case rpc:call(node(), global, sync, [], 5000) of
+    case rpc:call(node(), global, sync, [], ?SYNC_TIMEOUT) of
         ok ->
             ok;
         {badrpc, timeout} ->
@@ -81,14 +83,28 @@ fix_global_server() ->
     check_repaired_global_server(Synced).
 
 check_repaired_global_server(OldSyncedNodes) ->
-    case rpc:call(node(), global, sync, [], 5000) of
+    case rpc:call(node(), global, sync, [], ?SYNC_TIMEOUT) of
         ok ->
+            error_logger:error_msg("Minishard global fixer: OK, fixed by disconecting unsynced nodes", []),
             ok;
         {badrpc, timeout} ->
             % Something went wrong, so disconnect also nodes that were initially synced
-            error_logger:error_msg("Minishard global fixer: second sync timed out, resetting connections to nodes: ~9999p", [OldSyncedNodes]),
-            [erlang:disconnect_node(N) || N <- OldSyncedNodes],
+            error_logger:error_msg("Minishard global fixer: second sync timed out, will reset connections to nodes: ~9999p", [OldSyncedNodes]),
+            disconnect_until_synced(OldSyncedNodes),
             % Ensure everything is OK now or retry
             check_global_server()
     end.
 
+disconnect_until_synced([]) ->
+    ok;
+disconnect_until_synced([Node|Nodes]) ->
+    error_logger:error_msg("Minishard global fixer: resetting a connection to the next node: ~w", [Node]),
+    _ = erlang:disconnect_node(Node),
+    _ = net_adm:ping(Node),
+    case rpc:call(node(), global, sync, [], ?SYNC_TIMEOUT) of
+        ok ->
+            error_logger:error_msg("Minishard global fixer: OK, finally fixed after disconnecting ~w", [Node]),
+            ok;
+        {badrpc, timeout} ->
+            disconnect_until_synced(Nodes)
+    end.
