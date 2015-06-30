@@ -8,7 +8,7 @@
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3, code_change/3, terminate/2]).
 
 %% global conflict resolver
--export([resolve_conflict/3]).
+-export([get_score_or_kill/1, resolve_conflict/3]).
 
 name(ClusterName) when is_atom(ClusterName) ->
     list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_shard").
@@ -97,6 +97,8 @@ init(#shard{} = State) ->
 
 
 %% Initial status discovery. Later watcher will notify us about status changes
+handle_info(timeout, #shard{status = starting, cluster_name = minishard_demo} = State0) ->
+    {noreply, join_cluster(State0#shard{status = idle})};
 handle_info(timeout, #shard{status = starting, cluster_name = ClusterName} = State0) ->
     State = State0#shard{status = idle},
     NewState = case minishard_watcher:status(ClusterName) of
@@ -222,14 +224,12 @@ join_cluster(#shard{status = standby} = State) ->
 join_cluster(#shard{status = active} = State) ->
     % Already active, do nothing. This may happen after transition
     State;
-join_cluster(#shard{status = idle, cluster_name = ClusterName, max_number = MaxNumber} = State) ->
-    ok = global:sync(), % Ensure we have fresh shard map
-    AllShardNums = lists:seq(1, MaxNumber),
-    case register_or_monitor(ClusterName, AllShardNums) of
-        {registered, MyNumber} ->
+join_cluster(#shard{status = idle, cluster_name = ClusterName} = State) ->
+    case minishard_allocator:bind(ClusterName) of
+        {active, MyNumber} ->
             activate(MyNumber, State);
-        {monitored, Monitors} ->
-            export_status(State#shard{status = standby, my_number = undefined, monitors = Monitors})
+        standby ->
+            export_status(State#shard{status = standby, my_number = undefined})
     end.
 
 %% Perform all activation stuff when we capture a shard number
@@ -251,6 +251,8 @@ idle(#shard{status = active} = State) ->
 
 
 %% Due to some troubles global has after netsplit, we need to periodically ensure we still own the shard number
+schedule_recheck(#shard{cluster_name = minishard_demo} = State) ->
+    State;
 schedule_recheck(#shard{} = State) ->
     Timer = erlang:start_timer(100, self(), recheck_ownership),
     State#shard{recheck_timer = Timer}.

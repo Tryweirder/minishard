@@ -91,17 +91,20 @@ init(root) ->
     {ok, {{one_for_one, 1, 5}, [GFixerSpec]}};
 
 init({cluster, ClusterName, CallbackMod}) ->
-    WatcherSpec = {watcher,
-                   {minishard_watcher, start_link, [ClusterName, CallbackMod]},
-                   permanent, 1000, worker, [minishard_watcher]},
-    PingersSpec = {pingers,
-                   {?MODULE, start_link, [{pingers, ClusterName}]},
-                   permanent, 1000, supervisor, []},
+    AllocatorSpec = {allocator,
+                     {minishard_allocator, start_link, [ClusterName, CallbackMod]},
+                     permanent, 1000, worker, [minishard_allocator]},
+%    WatcherSpec = {watcher,
+%                   {minishard_watcher, start_link, [ClusterName, CallbackMod]},
+%                   permanent, 1000, worker, [minishard_watcher]},
+%    PingersSpec = {pingers,
+%                   {?MODULE, start_link, [{pingers, ClusterName}]},
+%                   permanent, 1000, supervisor, []},
     ShardSpec = {shard,
                  {minishard_shard, start_link, [ClusterName, CallbackMod]},
                    permanent, 1000, worker, [minishard_shard]},
 
-    {ok, {{one_for_all, 5, 10}, [WatcherSpec, PingersSpec, ShardSpec]}};
+    {ok, {{one_for_all, 5, 10}, [AllocatorSpec, ShardSpec]}};
 
 init({pingers, _}) ->
     {ok, {{one_for_one, 5, 5}, []}};
