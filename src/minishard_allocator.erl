@@ -45,15 +45,15 @@
 
 %% Conflict resolution status
 -record(conflict, {
-        shard :: integer(),             % Conflicting shard number
-        ref   :: reference(),           % Resolution reference
-        score :: undefined | integer()  % Score reported by a member
+        shard :: integer(),                     % Conflicting shard number
+        ref   :: reference(),                   % Resolution reference
+        score :: undefined | minishard:score()  % Score reported by a member
         }).
 %% Conflict score report
 -record(score_report, {
-        ref   :: reference(),           % Resolution reference
-        node  :: node(),                % Reporting node
-        score :: integer()              % Reported score
+        ref   :: reference(),                   % Resolution reference
+        node  :: node(),                        % Reporting node
+        score :: minishard:score()              % Reported score
         }).
 
 %% Active status

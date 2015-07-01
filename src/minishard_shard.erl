@@ -331,7 +331,7 @@ resolve_conflict(Name, Shard1, Shard2) ->
 get_score_or_kill(ShardPid) ->
     ScoreGetResult = rpc:call(node(), gen_server, call, [ShardPid, score, 1000]),
     if
-        is_integer(ScoreGetResult) ->
+        is_number(ScoreGetResult) ->
             ScoreGetResult;
         true ->
             % We don't care what exactly goes wrong, we just kill it
