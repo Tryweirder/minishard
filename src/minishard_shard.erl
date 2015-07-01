@@ -97,27 +97,8 @@ init(#shard{} = State) ->
 
 
 %% Initial status discovery. Later watcher will notify us about status changes
-handle_info(timeout, #shard{status = starting, cluster_name = minishard_demo} = State0) ->
+handle_info(timeout, #shard{status = starting} = State0) ->
     {noreply, join_cluster(State0#shard{status = idle})};
-handle_info(timeout, #shard{status = starting, cluster_name = ClusterName} = State0) ->
-    State = State0#shard{status = idle},
-    NewState = case minishard_watcher:status(ClusterName) of
-        available ->
-            join_cluster(State);
-        _ ->
-            idle(State)
-    end,
-    {noreply, NewState};
-
-%% Some monitored process (we monitor other shards, but user code may monitor something else) dies
-handle_info({'DOWN', MonRef, process, _Pid, _Reason}, #shard{monitors = Mons, status = standby} = State) ->
-    NewState = case which_shard_failed(MonRef, Mons) of
-        undefined -> % Unexpected monitor report, ignore it
-            State;
-        ShardNum when is_integer(ShardNum) -> % Ok, now we should try to register as a failed shard
-            try_failover(ShardNum, State)
-    end,
-    {noreply, NewState};
 
 handle_info({timeout, Timer, recheck_ownership}, #shard{recheck_timer = Timer} = State) ->
     handle_ownership_recheck(State#shard{recheck_timer = undefined});
@@ -205,18 +186,6 @@ export_status(#shard{status = Status} = State) ->
     State.
 
 
-%% Try to take failed shard
-try_failover(ShardNum, #shard{cluster_name = ClusterName, monitors = MonMap} = State) ->
-    case register_or_monitor(ClusterName, [ShardNum]) of
-        {registered, ShardNum} ->
-            _ = demonitor_all(MonMap),
-            activate(ShardNum, State);
-        {monitored, MonPatch} ->
-            NewMonMap = maps:merge(MonMap, MonPatch),
-            State#shard{monitors = NewMonMap}
-    end.
-
-
 %% Try to join a cluster and take a free shard if possible
 join_cluster(#shard{status = standby} = State) ->
     % Already waiting for free shard number. This may happen after transition
@@ -243,8 +212,7 @@ activate(MyNumber, #shard{} = State) ->
 idle(#shard{status = idle} = State) ->
     % Nothing to do
     State;
-idle(#shard{status = standby, monitors = Monitors} = State) ->
-    demonitor_all(Monitors),
+idle(#shard{status = standby} = State) ->
     export_status(State#shard{status = idle, monitors = #{}});
 idle(#shard{status = active} = State) ->
     export_status(State#shard{status = idle, my_number = undefined}).
@@ -270,44 +238,6 @@ callback_prolong(Loser, #shard{callback_mod = CallbackMod, callback_state = Call
 callback_deallocate(Winner, #shard{callback_mod = CallbackMod, callback_state = CallbackState} = State) ->
     _ = CallbackMod:deallocated(Winner, CallbackState),
     State#shard{callback_state = undefined}.
-
-
-%% Resolve key by value
-which_shard_failed(MonRef, MonMap) ->
-    case maps:fold(fun(Num, Ref, Matched) -> cons_if(Ref == MonRef, Num, Matched) end, [], MonMap) of
-        [] -> undefined;
-        [Num] -> Num
-    end.
-
-%% Helper for Value-Key resolver
-cons_if(false, _Hd, Tail) -> Tail;
-cons_if(true, Hd, Tail) -> [Hd|Tail].
-
-
-register_or_monitor(ClusterName, AllShardNums) ->
-    register_or_monitor(ClusterName, AllShardNums, #{}).
-
-register_or_monitor(_ClusterName, [], PidMap) ->
-    MonMap = maps:map(fun(_N, Pid) -> erlang:monitor(process, Pid) end, PidMap),
-    {monitored, MonMap};
-register_or_monitor(ClusterName, [Num | ShardNums], PidMap) ->
-    Name = global_name(ClusterName, Num),
-    ExistingPid = global:whereis_name(Name),
-    RegResult = (ExistingPid == undefined) andalso global:register_name(Name, self(), fun ?MODULE:resolve_conflict/3),
-    case {ExistingPid, RegResult} of
-        {undefined, yes} -> % We have successfully registered as a new shard
-            {registered, Num};
-        {undefined, no} -> % Race condition during registration, re-resolve pid by stupid recursion
-            register_or_monitor(ClusterName, [Num | ShardNums], PidMap);
-        {ExistingPid, _} when is_pid(ExistingPid) -> % Shard was already running
-            NewPidMap = maps:put(Num, ExistingPid, PidMap),
-            register_or_monitor(ClusterName, ShardNums, NewPidMap)
-    end.
-
-
-demonitor_all(Monitors) ->
-    _ = maps:map(fun(_N, MonRef) -> erlang:demonitor(MonRef, [flush]) end, Monitors),
-    ok.
 
 
 
