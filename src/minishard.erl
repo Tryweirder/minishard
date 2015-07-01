@@ -40,11 +40,11 @@ join(ClusterName, CallbackMod) ->
 
 %% Resolve a shard number to the shard manager pid
 get_manager(ClusterName, ShardNum) ->
-    minishard_shard:manager_pid(ClusterName, ShardNum).
+    minishard_allocator:get_manager(ClusterName, ShardNum).
 
 %% Resolve a shard number to the node currently hosting it
 get_node(ClusterName, ShardNum) ->
-    minishard_shard:allocated_node(ClusterName, ShardNum).
+    minishard_allocator:get_node(ClusterName, ShardNum).
 
 %% Cluster status
 %% TODO: store CallbackMod and do not require user to provide it

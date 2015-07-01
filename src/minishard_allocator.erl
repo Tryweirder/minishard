@@ -21,6 +21,7 @@
 %% API
 -export([start_link/2]).
 -export([bind/1]).
+-export([get_manager/2, get_node/2]).
 
 %% gen_leader callbacks
 -export([
@@ -63,6 +64,7 @@
 
 -type node_status() :: down | #request{} | #conflict{} | idle | standby | #active{}.
 -type allocation_map() :: map(node(), node_status()).
+-type manager_map() :: map(node(), undefined | pid()).
 
 %% gen_leader callback state
 -record(allocator, {
@@ -72,9 +74,24 @@
         last_response :: reference(),
         shard_manager :: undefined | pid(),
         shard_count :: integer(),
-        map :: allocation_map()
+        map :: allocation_map(),
+        managers :: manager_map()
         }).
 
+
+%% ETS data model for shard information
+-define(ets_shard_key(Shard), {shard, Shard}).
+-define(ets_shard_node_pos, 2).
+-define(ets_shard_manager_pos, 3).
+-define(ets_shard_record(Shard, Node, Manager), {?ets_shard_key(Shard), Node, Manager}).
+
+%% API: Resolve a shard number to the shard manager pid
+get_manager(ClusterName, Shard) ->
+    ets:lookup_element(ClusterName, ?ets_shard_key(Shard), ?ets_shard_manager_pos).
+
+%% API: Resolve a shard number to the node currently hosting it
+get_node(ClusterName, Shard) ->
+    ets:lookup_element(ClusterName, ?ets_shard_key(Shard), ?ets_shard_node_pos).
 
 %% API: start the allocator for given cluster
 start_link(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(CallbackMod) ->
@@ -87,13 +104,15 @@ start_link(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Callback
 seed_state(ClusterName, CallbackMod) ->
     Nodes = CallbackMod:cluster_nodes(ClusterName),
     SeedMap = maps:from_list([{N, down} || N <- Nodes]),
+    SeedManagers = maps:from_list([{N, undefined} || N <- Nodes]),
     #allocator{
         name = ClusterName,
         callback_mod = CallbackMod,
         shard_manager = undefined,
         my_status = idle,
         shard_count = CallbackMod:shard_count(ClusterName),
-        map = SeedMap }.
+        map = SeedMap,
+        managers = SeedManagers }.
 
 
 %% Register a shard manager ready to host a shard
@@ -102,7 +121,8 @@ bind(ClusterName) ->
 
 
 %% Init: nothing special, we start with an empty map
-init(#allocator{} = State) ->
+init(#allocator{name = Name} = State) ->
+    Name = ets:new(Name, [protected, named_table, set, {read_concurrency, true}]),
     {ok, State}.
 
 
@@ -114,10 +134,9 @@ handle_info(Msg, #allocator{name = Name} = State, _Election) ->
     error_logger:warning_msg("Minishard allocator ~w got unexpected info ~9999p", [Name, Msg]),
     {noreply, State}.
 
-handle_call({bind, Shard}, From, #allocator{name = Name} = State, _Election) ->
-    link(Shard),
-    NewState = State#allocator{shard_manager = Shard},
-    ok = ?GEN_LEADER:leader_cast(Name, {node_ready, node(), From}),
+handle_call({bind, ShardManager}, From, #allocator{name = Name} = State, _Election) ->
+    NewState = State#allocator{shard_manager = ShardManager},
+    ok = ?GEN_LEADER:leader_cast(Name, {bind_manager, node(), ShardManager, From}),
     {noreply, NewState};
 handle_call(_Request, _From, #allocator{} = State, _Election) ->
     {reply, {error, not_implemented}, State}.
@@ -158,12 +177,18 @@ surrendered(#allocator{name = Name} = State, _Synch, _Election) ->
 handle_leader_call(_Request, _From, State, _Election) ->
     {reply, {error, not_implemented}, State}.
 
-handle_leader_cast({node_ready, Node, From}, #allocator{name = Name, map = Map, shard_count = ShardCount} = State, _Election) ->
-    error_logger:info_msg("Minishard allocator ~w adds ~w as good node", [Name, Node]),
-    NewMap = reallocate(ShardCount, set_statuses([Node], standby, Map)),
-    NewState = install_new_map(NewMap, State),
-    _ = ?GEN_LEADER:reply(From, get_allocation(Node, NewMap)),
-    {ok, NewState, NewState};
+handle_leader_cast({bind_manager, Node, ShardManager, From}, #allocator{map = Map, name = Name} = State, _Election) ->
+    case maps:is_key(Node, Map) of
+        true ->
+            error_logger:info_msg("Minishard allocator ~w adds ~w as good node", [Name, Node]),
+            StateWithManager = set_manager(Node, ShardManager, State),
+            NewState = #allocator{map = NewMap} = set_realloc_install([Node], standby, StateWithManager),
+            _ = ?GEN_LEADER:reply(From, get_allocation(Node, NewMap)),
+            {ok, NewState, NewState};
+        false ->
+            _ = ?GEN_LEADER:reply(From, not_my_cluster),
+            {noreply, State}
+    end;
 
 handle_leader_cast({request_timeout, RequestRef}, #allocator{} = State, _Election) ->
     case handle_request_timeout(RequestRef, State) of
@@ -272,16 +297,30 @@ handle_new_election(Election, #allocator{name = Name, map = Map, shard_count = S
             set_statuses(BecameAlive, #request{ref = RequestRef}, MapMarkedDown)
     end,
 
+    StateManagersRemoved = lists:foldl(fun remove_manager/2, State, BecameDown),
     NewMap = reallocate(ShardCount, MapMarkedReq),
-    install_new_map(NewMap, State).
+    install_new_map(NewMap, StateManagersRemoved).
 
+%% Remember node's bound manager
+-spec set_manager(Node :: node(), Manager :: undefined | pid(), #allocator{}) -> #allocator{}.
+set_manager(Node, ShardManager, #allocator{managers = ManMap} = State) ->
+    true = maps:is_key(Node, ManMap),
+    NewManMap = maps:update(Node, ShardManager, ManMap),
+    State#allocator{managers = NewManMap}.
+
+%% manager map cleaner compatible with lists:foldl
+-spec remove_manager(Node :: node(), #allocator{}) -> #allocator{}.
+remove_manager(Node, #allocator{} = State) ->
+    set_manager(Node, undefined, State).
 
 %% Set given status for a given list of nodes, reallocate shards, install the updated map
 -spec set_realloc_install(Nodes :: [node()], Status :: node_status(), #allocator{}) -> #allocator{}.
 set_realloc_install(Nodes, Status, #allocator{map = Map, shard_count = ShardCount} = State) ->
     MapUpdated = set_statuses(Nodes, Status, Map),
     NewMap = reallocate(ShardCount, MapUpdated),
-    install_new_map(NewMap, State).
+    NewState = install_new_map(NewMap, State),
+    export_shard_map(NewState),
+    NewState.
 
 %% batch set status for given list of nodes
 -spec set_statuses(Nodes :: [node()], Status :: node_status(), Map :: allocation_map()) -> allocation_map().
@@ -355,6 +394,23 @@ handle_my_new_status(down, State) ->
 handle_my_new_status(Status, #allocator{} = State) ->
     State#allocator{my_status = Status}.
 
+
+%% Export a shard map to the ETS
+export_shard_map(#allocator{name = Name, shard_count = ShardCount, map = NodeMap, managers = ManagerMap}) ->
+    SeedShardMap = maps:from_list([{Shard, undefined} || Shard <- lists:seq(1, ShardCount)]),
+    ShardNodeMap = maps:fold(fun collect_active_shards/3, SeedShardMap, NodeMap),
+    _ = maps:fold(fun export_shard_info/3, {Name, ManagerMap}, ShardNodeMap),
+    ok.
+
+collect_active_shards(Node, #active{shard = Shard}, ShardNodeMap) ->
+    maps:update(Shard, Node, ShardNodeMap);
+collect_active_shards(_Node, _Status, ShardNodeMap) ->
+    ShardNodeMap.
+
+export_shard_info(Shard, Node, {Name, ManagerMap}) ->
+    Manager = maps:get(Node, ManagerMap, undefined),
+    true = ets:insert(Name, ?ets_shard_record(Shard, Node, Manager)),
+    {Name, ManagerMap}.
 
 %% A node has sent a valid status update. We should check the updated map for conflicts and maybe start resolution
 -spec handle_possible_conflicts(Node :: node(), Status :: node_status(), #allocator{}) -> #allocator{}.
