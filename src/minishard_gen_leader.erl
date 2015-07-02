@@ -85,6 +85,7 @@
         ]).
 
 %% Internal exports
+-export([real_loop/4, real_safe_loop/4, real_mon_loop/2]).
 -export([init_it/6,
          print_event/3,
          send_checkleads/4
@@ -522,7 +523,10 @@ init_it(Starter,Parent,Name,Mod,{UnsortedCandidateNodes,OptArgs,Arg},Options) ->
 % to the election process are received.  User messages, defined
 % in e.g. a callback module, are postponed until the (re)election\
 % is complete.
-safe_loop(#server{mod = Mod, state = State} = Server, Role,
+safe_loop(#server{} = Server, Role, #election{} = Election, PrevMsg) ->
+    ?MODULE:real_safe_loop(Server, Role, Election, PrevMsg).
+
+real_safe_loop(#server{mod = Mod, state = State} = Server, Role,
           #election{name = Name} = E, _PrevMsg) ->
     receive
         {system, From, Req} ->
@@ -793,7 +797,10 @@ safe_loop(#server{mod = Mod, state = State} = Server, Role,
 
 % this is the regular operation loop.  All messages are received,
 % unexpected ones are discarded.
-loop(#server{parent = Parent,
+loop(#server{} = Server, Role, #election{} = Election, PrevMsg) ->
+    ?MODULE:real_loop(Server, Role, Election, PrevMsg).
+
+real_loop(#server{parent = Parent,
              mod = Mod,
              state = State,
              debug = Debug} = Server, Role,
@@ -1543,6 +1550,9 @@ do_monitor(Proc, #server{monitor_proc = P}) ->
     end.
 
 mon_loop(Parent, Refs) ->
+    ?MODULE:real_mon_loop(Parent, Refs).
+
+real_mon_loop(Parent, Refs) ->
     receive
         {From, Req} ->
             mon_loop(Parent, mon_handle_req(Req, From, Refs));
