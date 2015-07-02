@@ -44,11 +44,7 @@ join_cluster(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(Callba
 
 
 init(root) ->
-    GFixerSpec = {global_fixer,
-                  {minishard_global_fixer, start_link, []},
-                  permanent, 1000, worker, [minishard_global_fixer]},
-
-    {ok, {{one_for_one, 1, 5}, [GFixerSpec]}};
+    {ok, {{one_for_one, 1, 5}, []}};
 
 init({cluster, ClusterName, CallbackMod}) ->
     AllocatorSpec = {allocator,

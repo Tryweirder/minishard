@@ -115,7 +115,7 @@
 %% A monitor ref
 -type mon_ref() :: reference().
 
--type server_ref() :: name() | {name(),node()} | {global,name()} | pid().
+-type server_ref() :: name() | {name(),node()} | pid().
 
 %% Incarnation number
 -type incarn() :: non_neg_integer().
@@ -396,8 +396,6 @@ leader_cast(Name, Request) ->
     ok.
 
 
-do_cast(Tag, {global, Name}, Request) ->
-    global:send(Name, {Tag, Request});
 do_cast(Tag, ServerRef, Request) ->
     ServerRef ! {Tag, Request}.
 
