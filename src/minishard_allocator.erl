@@ -23,6 +23,9 @@
 -export([bind/1]).
 -export([get_manager/2, get_node/2]).
 
+%% Testing/debugging
+-export([set_hacks/2]).
+
 %% gen_leader callbacks
 -export([
     init/1,
@@ -81,7 +84,8 @@
         shard_manager :: undefined | pid(),
         shard_count :: integer(),
         map :: allocation_map(),
-        managers :: manager_map()
+        managers :: manager_map(),
+        hacks :: map(atom(), any())
         }).
 
 
@@ -100,14 +104,21 @@ get_node(ClusterName, Shard) ->
     ets:lookup_element(ClusterName, ?ets_shard_key(Shard), ?ets_shard_node_pos).
 
 %% API: start the allocator for given cluster
-start_link(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(CallbackMod) ->
+start_link(ClusterName, CallbackMod) ->
+    start_link(ClusterName, CallbackMod, #{}).
+
+start_link(ClusterName, CallbackMod, #{} = Hacks) when is_atom(ClusterName), is_atom(CallbackMod) ->
     Options = [{heartbeat, 5}, {bcast_type, all}, {seed_node, none}],
-    State0 = #allocator{map = Map} = seed_state(ClusterName, CallbackMod),
+    State0 = #allocator{map = Map} = seed_state(ClusterName, CallbackMod, Hacks),
     Nodes = maps:keys(Map),
     ?GEN_LEADER:start_link(ClusterName, Nodes, Options, ?MODULE, State0, []).
 
+%% Test/debug API: set hacks for a running allocator
+set_hacks(Name, #{} = Hacks) when is_atom(Name) ->
+    ?GEN_LEADER:call(Name, {set_hacks, Hacks}).
+
 %% Seed state for a starting allocator
-seed_state(ClusterName, CallbackMod) ->
+seed_state(ClusterName, CallbackMod, Hacks) ->
     Nodes = CallbackMod:cluster_nodes(ClusterName),
     SeedMap = maps:from_list([{N, down} || N <- Nodes]),
     SeedManagers = maps:from_list([{N, undefined} || N <- Nodes]),
@@ -118,7 +129,8 @@ seed_state(ClusterName, CallbackMod) ->
         my_status = idle,
         shard_count = CallbackMod:shard_count(ClusterName),
         map = SeedMap,
-        managers = SeedManagers }.
+        managers = SeedManagers,
+        hacks = Hacks }.
 
 
 %% Register a shard manager ready to host a shard
@@ -150,17 +162,18 @@ handle_call({bind, ShardManager}, _From, #allocator{name = Name} = State, _Elect
     NewState = State#allocator{shard_manager = ShardManager},
     ok = ?GEN_LEADER:leader_cast(Name, {bind_manager, node(), ShardManager, undefined}),
     {reply, standby, NewState};
+handle_call({set_hacks, Hacks}, _From, #allocator{} = State, _Election) ->
+    {reply, ok, State#allocator{hacks = Hacks}};
 handle_call(_Request, _From, #allocator{} = State, _Election) ->
     {reply, {error, not_implemented}, State}.
 
 
 
 %% We are elected. Propagate our allocation map
-elected(#allocator{name = Name, map = Map, my_status = MyStatus} = State, Election, Loser) ->
+elected(#allocator{name = Name} = State, Election, Loser) ->
     error_logger:info_msg("Minishard allocator ~w elected, ~w surrendered", [Name, Loser]),
-    StateSelfUpdated = State#allocator{map = maps:update(node(), MyStatus, Map)},
-    StateElectionHandled = handle_new_election(Election, StateSelfUpdated),
-    NewState = restart_requests(StateElectionHandled),
+    StateRequestsRestarted = restart_requests(State),
+    NewState = handle_new_election(Election, StateRequestsRestarted),
     {ok, NewState, NewState}.
     
 
@@ -430,7 +443,8 @@ handle_my_new_status(OldStatus, #allocator{my_status = OldStatus} = State) ->
 handle_my_new_status(#request{ref = Ref}, #allocator{last_response = Ref} = State) ->
     % We have already sent a status update for this request
     State;
-handle_my_new_status(#request{ref = Ref}, #allocator{name = Name, my_status = MyStatus, shard_manager = Manager} = State) ->
+handle_my_new_status(#request{ref = Ref}, #allocator{name = Name, my_status = MyStatus, shard_manager = Manager, hacks = Hacks} = State) ->
+    apply_hack(on_status_request, Hacks),
     % New status request. Send an update and wait
     Report = #status_update{ref = Ref, node = node(), status = MyStatus, manager = Manager},
     ?GEN_LEADER:leader_cast(Name, Report),
@@ -438,7 +452,8 @@ handle_my_new_status(#request{ref = Ref}, #allocator{name = Name, my_status = My
 handle_my_new_status(#conflict{ref = Ref}, #allocator{last_response = Ref} = State) ->
     % We have already sent a score for this conflict
     State;
-handle_my_new_status(#conflict{ref = Ref}, #allocator{name = Name, shard_manager = ShManager} = State) ->
+handle_my_new_status(#conflict{ref = Ref}, #allocator{name = Name, shard_manager = ShManager, hacks = Hacks} = State) ->
+    apply_hack(on_conflict_request, Hacks),
     % New score request. Send an update and wait
     case minishard_shard:get_score_or_kill(ShManager) of
         undefined ->
@@ -448,7 +463,8 @@ handle_my_new_status(#conflict{ref = Ref}, #allocator{name = Name, shard_manager
             ?GEN_LEADER:leader_cast(Name, Report),
             State#allocator{last_response = Ref}
     end;
-handle_my_new_status(down, #allocator{} = State) ->
+handle_my_new_status(down, #allocator{shard_manager = Manager} = State) ->
+    ok = set_manager_status(Manager, idle),
     throw({stop, {shutdown, shut_down_by_leader}, State});
 handle_my_new_status(#active{shard = NewShard}, #allocator{my_status = #active{shard = OldShard}} = State)
         when NewShard /= OldShard ->
@@ -495,11 +511,12 @@ node_status_for_manager(#active{shard = Shard}) -> {active, Shard}.
 
 %% A node has sent a valid status update. We should check the updated map for conflicts and maybe start resolution
 -spec handle_possible_conflicts(Node :: node(), Status :: node_status(), #allocator{}) -> #allocator{}.
-handle_possible_conflicts(Node, #active{shard = Shard} = Status, #allocator{name = Name, map = Map} = State) ->
+handle_possible_conflicts(Node, #active{shard = Shard} = Status, #allocator{name = Name, map = Map, hacks = Hacks} = State) ->
     case shard_nodes(Shard, Map) of
         [] -> % no other candidates for this shard
             set_realloc_install([Node], Status, State);
         [_|_] = ConflictingNodes -> % Oops, we have a conflict
+            apply_hack(on_conflict_detected, Hacks),
             {Conflict, _} = make_conflict_request(Name, Shard),
             set_realloc_install([Node|ConflictingNodes], Conflict, State)
     end;
@@ -601,3 +618,12 @@ find_best_score({BestNode, BestScore}, {_Node, Score}) when BestScore >= Score -
     {BestNode, BestScore};
 find_best_score({_Node, _PrevBestScore}, {BetterNode, BetterScore}) ->
     {BetterNode, BetterScore}.
+
+
+%% Hacks: apply a hack
+apply_hack(HackName, Hacks) ->
+    case maps:get(HackName, Hacks, undefined) of
+        undefined -> ok;
+        Fun when is_function(Fun, 0) -> Fun();
+        {M, F, A} when is_atom(M), is_atom(F), is_list(A) -> apply(M, F, A)
+    end.
