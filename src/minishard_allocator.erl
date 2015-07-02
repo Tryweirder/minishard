@@ -41,7 +41,13 @@
 
 %% Candidate status request
 -record(request, {
-        ref :: reference()    % Request reference
+        ref :: reference()              % Request reference
+        }).
+-record(status_update, {
+        ref :: reference(),             % Request reference
+        node  :: node(),                % Reporting node
+        status :: node_status(),        % Reported status
+        manager :: undefined | pid()    % Current node's shard manager
         }).
 
 %% Conflict resolution status
@@ -119,6 +125,12 @@ seed_state(ClusterName, CallbackMod) ->
 bind(ClusterName) ->
     ?GEN_LEADER:call(ClusterName, {bind, self()}).
 
+%% Helper for possible asynchronous manager reply
+manager_reply(undefined, _) ->
+    ok;
+manager_reply(From, Reply) ->
+    ?GEN_LEADER:reply(From, Reply).
+
 
 %% Init: nothing special, we start with an empty map
 init(#allocator{name = Name} = State) ->
@@ -134,10 +146,10 @@ handle_info(Msg, #allocator{name = Name} = State, _Election) ->
     error_logger:warning_msg("Minishard allocator ~w got unexpected info ~9999p", [Name, Msg]),
     {noreply, State}.
 
-handle_call({bind, ShardManager}, From, #allocator{name = Name} = State, _Election) ->
+handle_call({bind, ShardManager}, _From, #allocator{name = Name} = State, _Election) ->
     NewState = State#allocator{shard_manager = ShardManager},
-    ok = ?GEN_LEADER:leader_cast(Name, {bind_manager, node(), ShardManager, From}),
-    {noreply, NewState};
+    ok = ?GEN_LEADER:leader_cast(Name, {bind_manager, node(), ShardManager, undefined}),
+    {reply, standby, NewState};
 handle_call(_Request, _From, #allocator{} = State, _Election) ->
     {reply, {error, not_implemented}, State}.
 
@@ -146,8 +158,9 @@ handle_call(_Request, _From, #allocator{} = State, _Election) ->
 %% We are elected. Propagate our allocation map
 elected(#allocator{name = Name, map = Map, my_status = MyStatus} = State, Election, Loser) ->
     error_logger:info_msg("Minishard allocator ~w elected, ~w surrendered", [Name, Loser]),
-    State1 = State#allocator{map = maps:update(node(), MyStatus, Map)},
-    NewState = handle_new_election(Election, State1),
+    StateSelfUpdated = State#allocator{map = maps:update(node(), MyStatus, Map)},
+    StateElectionHandled = handle_new_election(Election, StateSelfUpdated),
+    NewState = restart_requests(StateElectionHandled),
     {ok, NewState, NewState}.
     
 
@@ -180,39 +193,44 @@ handle_leader_call(_Request, _From, State, _Election) ->
 handle_leader_cast({bind_manager, Node, ShardManager, From}, #allocator{map = Map, name = Name} = State, _Election) ->
     case maps:is_key(Node, Map) of
         true ->
-            error_logger:info_msg("Minishard allocator ~w adds ~w as good node", [Name, Node]),
+            error_logger:info_msg("Minishard allocator ~w *** LEADER *** adds ~w as good node", [Name, Node]),
             StateWithManager = set_manager(Node, ShardManager, State),
             NewState = #allocator{map = NewMap} = set_realloc_install([Node], standby, StateWithManager),
-            _ = ?GEN_LEADER:reply(From, get_allocation(Node, NewMap)),
+            _ = manager_reply(From, get_allocation(Node, NewMap)),
             {ok, NewState, NewState};
         false ->
-            _ = ?GEN_LEADER:reply(From, not_my_cluster),
+            _ = manager_reply(From, not_my_cluster),
             {noreply, State}
     end;
 
-handle_leader_cast({request_timeout, RequestRef}, #allocator{} = State, _Election) ->
+handle_leader_cast({request_timeout, RequestRef}, #allocator{name = Name} = State, _Election) ->
     case handle_request_timeout(RequestRef, State) of
         {updated, NewState} ->
+            error_logger:info_msg("Minishard allocator ~w *** LEADER *** status update ~w timeout", [Name, RequestRef]),
             {ok, NewState, NewState};
         unchanged ->
             {noreply, State}
     end;
 
-handle_leader_cast({status_update, RequestRef, Node, Status}, #allocator{map = Map} = State, _Election) ->
+handle_leader_cast(#status_update{ref = RequestRef, node = Node, status = Status, manager = Manager}, #allocator{name = Name, map = Map} = State, _Election) ->
+    error_logger:info_msg("Minishard allocator ~w *** LEADER *** got a status update from ~w (~w)", [Name, Node, Status]),
     case get_allocation(Node, Map) of
         #request{ref = RequestRef} ->
-            NewState = handle_possible_conflicts(Node, Status, State),
+            StateWithManager = set_manager(Node, Manager, State),
+            NewState = handle_possible_conflicts(Node, Status, StateWithManager),
             {ok, NewState, NewState};
         _ ->
             {noreply, State}
     end;
 
-handle_leader_cast({conflict_timeout, ConflictRef}, #allocator{map = Map} = State, _Election) ->
+handle_leader_cast({conflict_timeout, ConflictRef}, #allocator{name = Name, map = Map} = State, _Election) ->
     {Shard, NodeScores} = conflict_shard_and_scores(ConflictRef, Map),
+    Shard /= undefined andalso error_logger:info_msg("Minishard allocator ~w *** LEADER *** conflict ~w (shard ~w) timeout", [Name, ConflictRef, Shard]),
     NewState = resolve_conflict(Shard, NodeScores, State),
     {ok, NewState, NewState};
 
-handle_leader_cast(#score_report{ref = ReportRef, node = Node, score = Score}, #allocator{map = Map} = State, _Election) ->
+handle_leader_cast(#score_report{ref = ReportRef, node = Node, score = Score}, #allocator{name = Name, map = Map} = State, _Election) ->
+    error_logger:info_msg("Minishard allocator ~w *** LEADER *** got a score report from ~w (~w)", [Name, Node, Score]),
     NewMap = case get_allocation(Node, Map) of
         #conflict{ref = ReportRef} = Conflict ->
             set_statuses([Node], Conflict#conflict{score = Score}, Map);
@@ -234,9 +252,9 @@ handle_leader_cast(Msg, #allocator{name = Name} = State, _Election) ->
     {noreply, State}.
 
 
-from_leader(#allocator{map = NewMap}, #allocator{name = Name} = State, _Election) ->
+from_leader(#allocator{map = NewMap, managers = ManagerMap}, #allocator{name = Name} = State, _Election) ->
     error_logger:info_msg("Minishard allocator ~w got update from the leader.", [Name]),
-    {ok, install_new_map(NewMap, State)};
+    {ok, install_new_map(NewMap, State#allocator{managers = ManagerMap})};
 
 from_leader(Msg, #allocator{name = Name} = State, _Election) ->
     error_logger:info_msg("Minishard allocator ~w got a message from the leader: ~9999p", [Name, Msg]),
@@ -289,17 +307,57 @@ handle_new_election(Election, #allocator{name = Name, map = Map, shard_count = S
         [] ->
             MapMarkedDown;
         [_|_] ->
-            % Set timer to handle possible troubles during status request
-            RequestRef = make_ref(),
-            {ok, _} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {request_timeout, RequestRef}]),
-
             % Request statuses
-            set_statuses(BecameAlive, #request{ref = RequestRef}, MapMarkedDown)
+            {Request, _Timer} = make_status_request(Name),
+            set_statuses(BecameAlive, Request, MapMarkedDown)
     end,
 
     StateManagersRemoved = lists:foldl(fun remove_manager/2, State, BecameDown),
     NewMap = reallocate(ShardCount, MapMarkedReq),
     install_new_map(NewMap, StateManagersRemoved).
+
+-spec make_status_request(Name :: atom()) -> {#request{}, timer:tref()}.
+make_status_request(Name) ->
+    % Set timer to handle possible troubles during status request
+    RequestRef = make_ref(),
+    Request = #request{ref = RequestRef},
+    {ok, Timer} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {request_timeout, RequestRef}]),
+    {Request, Timer}.
+
+%% Restart all running requests. When leader changes during request, response may be lost.
+%% So we search for all status and score requests, then generate new references for them, starting corresponding timers
+restart_requests(#allocator{name = Name, map = Map} = State) ->
+    {Name, NewMap, _RefMigration} = maps:fold(fun restart_request/3, {Name, #{}, #{}}, Map),
+    State#allocator{map = NewMap}.
+
+restart_request(Node, #request{ref = OldRef} = OldRequest, {Name, Map, RefMigration}) ->
+    NewRequest = #request{ref = NewRef} = case maps:get(OldRef, RefMigration, undefined) of
+        undefined ->
+            {NewRequest_, _} = make_status_request(Name),
+            NewRequest_;
+        ExistingRef ->
+            OldRequest#request{ref = ExistingRef}
+    end,
+    restart_request_store(Name, Node, NewRequest, OldRef, NewRef, Map, RefMigration);
+restart_request(Node, #conflict{ref = OldRef, shard = Shard} = OldRequest, {Name, Map, RefMigration}) ->
+    NewRequest = #conflict{ref = NewRef} = case maps:get(OldRef, RefMigration, undefined) of
+        undefined ->
+            {NewRequest_, _} = make_conflict_request(Name, Shard),
+            NewRequest_;
+        ExistingRef ->
+            OldRequest#conflict{ref = ExistingRef, score = undefined}
+    end,
+    restart_request_store(Name, Node, NewRequest, OldRef, NewRef, Map, RefMigration);
+restart_request(Node, NotRequest, {Name, Map, RefMigration}) ->
+    NewMap = maps:put(Node, NotRequest, Map),
+    {Name, NewMap, RefMigration}.
+
+restart_request_store(Name, Node, NewRequest, OldRef, NewRef, Map, RefMigration) ->
+    NewMap = maps:put(Node, NewRequest, Map),
+    NewRefMigration = maps:put(OldRef, NewRef, RefMigration),
+    {Name, NewMap, NewRefMigration}.
+
+
 
 %% Remember node's bound manager
 -spec set_manager(Node :: node(), Manager :: undefined | pid(), #allocator{}) -> #allocator{}.
@@ -318,9 +376,7 @@ remove_manager(Node, #allocator{} = State) ->
 set_realloc_install(Nodes, Status, #allocator{map = Map, shard_count = ShardCount} = State) ->
     MapUpdated = set_statuses(Nodes, Status, Map),
     NewMap = reallocate(ShardCount, MapUpdated),
-    NewState = install_new_map(NewMap, State),
-    export_shard_map(NewState),
-    NewState.
+    install_new_map(NewMap, State).
 
 %% batch set status for given list of nodes
 -spec set_statuses(Nodes :: [node()], Status :: node_status(), Map :: allocation_map()) -> allocation_map().
@@ -361,7 +417,9 @@ install_new_map(OldMap, #allocator{map = OldMap} = State) ->
 install_new_map(NewMap, #allocator{name = Name} = State) ->
     error_logger:info_msg("Minishard allocator ~w: installing new map ~9999p", [Name, NewMap]),
     MyNewStatus = get_allocation(node(), NewMap),
-    handle_my_new_status(MyNewStatus, State#allocator{map = NewMap}).
+    NewState = handle_my_new_status(MyNewStatus, State#allocator{map = NewMap}),
+    ok = export_shard_map(NewState),
+    NewState.
 
 
 %% Leader has possibly changed our status. Let's see what we should do
@@ -372,9 +430,10 @@ handle_my_new_status(OldStatus, #allocator{my_status = OldStatus} = State) ->
 handle_my_new_status(#request{ref = Ref}, #allocator{last_response = Ref} = State) ->
     % We have already sent a status update for this request
     State;
-handle_my_new_status(#request{ref = Ref}, #allocator{name = Name, my_status = MyStatus} = State) ->
+handle_my_new_status(#request{ref = Ref}, #allocator{name = Name, my_status = MyStatus, shard_manager = Manager} = State) ->
     % New status request. Send an update and wait
-    ?GEN_LEADER:leader_cast(Name, {status_update, Ref, node(), MyStatus}),
+    Report = #status_update{ref = Ref, node = node(), status = MyStatus, manager = Manager},
+    ?GEN_LEADER:leader_cast(Name, Report),
     State#allocator{last_response = Ref};
 handle_my_new_status(#conflict{ref = Ref}, #allocator{last_response = Ref} = State) ->
     % We have already sent a score for this conflict
@@ -389,10 +448,19 @@ handle_my_new_status(#conflict{ref = Ref}, #allocator{name = Name, shard_manager
             ?GEN_LEADER:leader_cast(Name, Report),
             State#allocator{last_response = Ref}
     end;
-handle_my_new_status(down, State) ->
-    throw({stop, shut_down_by_leader, State});
-handle_my_new_status(Status, #allocator{} = State) ->
+handle_my_new_status(down, #allocator{} = State) ->
+    throw({stop, {shutdown, shut_down_by_leader}, State});
+handle_my_new_status(#active{shard = NewShard}, #allocator{my_status = #active{shard = OldShard}} = State)
+        when NewShard /= OldShard ->
+    throw({stop, {shard_suddenly_changed, OldShard, NewShard}, State});
+handle_my_new_status(#active{shard = OldShard} = Status, #allocator{my_status = #active{shard = OldShard}} = State) ->
+    State#allocator{my_status = Status};
+handle_my_new_status(Status, #allocator{shard_manager = Manager} = State)
+        when Status == idle; Status == standby; is_record(Status, active) ->
+    ok = set_manager_status(Manager, Status),
     State#allocator{my_status = Status}.
+
+
 
 
 %% Export a shard map to the ETS
@@ -412,6 +480,19 @@ export_shard_info(Shard, Node, {Name, ManagerMap}) ->
     true = ets:insert(Name, ?ets_shard_record(Shard, Node, Manager)),
     {Name, ManagerMap}.
 
+
+%% Set shard manager status when leader updates it
+-spec set_manager_status(Manager :: undefined | pid(), Status :: idle | standby | #active{}) -> ok.
+set_manager_status(undefined, _Status) -> % No manager, pass
+    ok;
+set_manager_status(Manager, Status) ->
+    minishard_shard:set_status(Manager, node_status_for_manager(Status)).
+
+node_status_for_manager(idle) -> idle;
+node_status_for_manager(standby) -> standby;
+node_status_for_manager(#active{shard = Shard}) -> {active, Shard}.
+
+
 %% A node has sent a valid status update. We should check the updated map for conflicts and maybe start resolution
 -spec handle_possible_conflicts(Node :: node(), Status :: node_status(), #allocator{}) -> #allocator{}.
 handle_possible_conflicts(Node, #active{shard = Shard} = Status, #allocator{name = Name, map = Map} = State) ->
@@ -419,14 +500,20 @@ handle_possible_conflicts(Node, #active{shard = Shard} = Status, #allocator{name
         [] -> % no other candidates for this shard
             set_realloc_install([Node], Status, State);
         [_|_] = ConflictingNodes -> % Oops, we have a conflict
-            CRef = make_ref(),
-            Conflict = #conflict{shard = Shard, ref = CRef, score = undefined},
-            {ok, _} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {conflict_timeout, CRef}]),
+            {Conflict, _} = make_conflict_request(Name, Shard),
             set_realloc_install([Node|ConflictingNodes], Conflict, State)
     end;
 
 handle_possible_conflicts(Node, Status, #allocator{} = State) ->
     set_realloc_install([Node], Status, State).
+
+
+-spec make_conflict_request(Name :: atom(), Shard :: integer()) -> {#conflict{}, timer:tref()}.
+make_conflict_request(Name, Shard) ->
+    CRef = make_ref(),
+    Conflict = #conflict{shard = Shard, ref = CRef, score = undefined},
+    {ok, Timer} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {conflict_timeout, CRef}]),
+    {Conflict, Timer}.
 
 
 resolve_conflict(undefined, [], #allocator{} = State) ->
