@@ -220,6 +220,11 @@
 	| {error, term()}
 	.
 
+-on_load(notify_new_code/0).
+notify_new_code() ->
+    [P ! code_reloaded || P <- processes(), erlang:check_process_code(P, ?MODULE) == true],
+    ok.
+
 -type start_ret() :: {'ok', pid()} | {'error', term()}.
 
 %% @doc Starts a gen_leader process without linking to the parent.
@@ -529,6 +534,8 @@ safe_loop(#server{} = Server, Role, #election{} = Election, PrevMsg) ->
 real_safe_loop(#server{mod = Mod, state = State} = Server, Role,
           #election{name = Name} = E, _PrevMsg) ->
     receive
+        code_reloaded = Msg ->
+            safe_loop(Server,Role,E,Msg);
         {system, From, Req} ->
             #server{parent = Parent, debug = Debug} = Server,
             sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug,
@@ -808,6 +815,8 @@ real_loop(#server{parent = Parent,
     receive
         Msg ->
             case Msg of
+                code_reloaded ->
+                    loop(Server,Role,E,Msg);
                 {system, From, Req} ->
                     sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug,
                                           [normal, Server, Role, E]);
@@ -1561,6 +1570,8 @@ mon_loop(Parent, Refs) ->
 
 real_mon_loop(Parent, Refs) ->
     receive
+        code_reloaded ->
+            mon_loop(Parent, Refs);
         {From, Req} ->
             mon_loop(Parent, mon_handle_req(Req, From, Refs));
         {'DOWN', Ref, _, _, _} ->
