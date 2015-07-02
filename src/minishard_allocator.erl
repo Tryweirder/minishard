@@ -19,7 +19,7 @@
 
 
 %% API
--export([start_link/2]).
+-export([start_link/2, cluster_status/1]).
 -export([bind/1]).
 -export([get_manager/2, get_node/2]).
 
@@ -144,6 +144,10 @@ manager_reply(From, Reply) ->
     ?GEN_LEADER:reply(From, Reply).
 
 
+%% Return cluster status in form {OverallStatusAtom, NodeStatusMap}
+cluster_status(ClusterName) when is_atom(ClusterName) ->
+    ?GEN_LEADER:call(ClusterName, cluster_status).
+
 %% Init: nothing special, we start with an empty map
 init(#allocator{name = Name} = State) ->
     Name = ets:new(Name, [protected, named_table, set, {read_concurrency, true}]),
@@ -162,6 +166,8 @@ handle_call({bind, ShardManager}, _From, #allocator{name = Name} = State, _Elect
     NewState = State#allocator{shard_manager = ShardManager},
     ok = ?GEN_LEADER:leader_cast(Name, {bind_manager, node(), ShardManager, undefined}),
     {reply, standby, NewState};
+handle_call(cluster_status, _From, #allocator{} = State, Election) ->
+    {reply, make_cluster_status(State, Election), State};
 handle_call({set_hacks, Hacks}, _From, #allocator{} = State, _Election) ->
     {reply, ok, State#allocator{hacks = Hacks}};
 handle_call(_Request, _From, #allocator{} = State, _Election) ->
@@ -480,11 +486,14 @@ handle_my_new_status(Status, #allocator{shard_manager = Manager} = State)
 
 
 %% Export a shard map to the ETS
-export_shard_map(#allocator{name = Name, shard_count = ShardCount, map = NodeMap, managers = ManagerMap}) ->
-    SeedShardMap = maps:from_list([{Shard, undefined} || Shard <- lists:seq(1, ShardCount)]),
-    ShardNodeMap = maps:fold(fun collect_active_shards/3, SeedShardMap, NodeMap),
+export_shard_map(#allocator{name = Name, managers = ManagerMap} = State) ->
+    ShardNodeMap = shard_node_map(State),
     _ = maps:fold(fun export_shard_info/3, {Name, ManagerMap}, ShardNodeMap),
     ok.
+
+shard_node_map(#allocator{shard_count = ShardCount, map = NodeMap}) ->
+    SeedShardMap = maps:from_list([{Shard, undefined} || Shard <- lists:seq(1, ShardCount)]),
+    maps:fold(fun collect_active_shards/3, SeedShardMap, NodeMap).
 
 collect_active_shards(Node, #active{shard = Shard}, ShardNodeMap) ->
     maps:update(Shard, Node, ShardNodeMap);
@@ -618,6 +627,35 @@ find_best_score({BestNode, BestScore}, {_Node, Score}) when BestScore >= Score -
     {BestNode, BestScore};
 find_best_score({_Node, _PrevBestScore}, {BetterNode, BetterScore}) ->
     {BetterNode, BetterScore}.
+
+
+%% Build cluster status report
+make_cluster_status(#allocator{shard_count = ShardCount, map = NodeMap} = State, _Election) ->
+    TotalNodeCnt = length(maps:keys(NodeMap)),
+    AliveNodesCnt = length(alive_nodes(State)),
+    ExportNodeMap = maps:map(fun export_node_status/2, NodeMap),
+    ShardNodeMap = shard_node_map(State),
+    NodeStatusMap = maps:fold(fun allocation_to_node_status/3, ExportNodeMap, ShardNodeMap),
+    AllocatedShardCnt = length(lists:filter(fun(N) -> N /= undefined end, maps:values(ShardNodeMap))),
+    OverallStatus = if
+        AllocatedShardCnt == ShardCount -> available;
+        AliveNodesCnt < ShardCount -> degraded;
+        AllocatedShardCnt < AliveNodesCnt -> allocation_pending;
+        true -> transition
+    end,
+    {OverallStatus, #{shards => {ShardCount, AllocatedShardCnt}, nodes => {TotalNodeCnt, AliveNodesCnt}}, NodeStatusMap}.
+
+allocation_to_node_status(ShardNum, undefined, NodeStatuses) ->
+    maps:put({not_allocated, ShardNum}, undefined, NodeStatuses);
+allocation_to_node_status(ShardNum, ShardNode, NodeStatuses) ->
+    maps:put(ShardNode, {active, ShardNum}, NodeStatuses).
+
+%% Translate node statuses to minishard external status format
+export_node_status(_Node, down) -> unavailable;
+export_node_status(_Node, idle) -> not_my_cluster;
+export_node_status(_Node, standby) -> available;
+export_node_status(_Node, #active{shard = Shard}) -> {active, Shard};
+export_node_status(_Node, _) -> transition.
 
 
 %% Hacks: apply a hack
