@@ -826,8 +826,15 @@ real_loop(#server{parent = Parent,
                             loop(Server, Role, E, Msg)
                     end;
                 {halt,_,From} ->
-                    From ! {hasLeader,E#election.leader,E#election.elid,self()},
-                    loop(Server,Role,E,Msg);
+                    T = E#election.elid,
+                    case E#election.leader of
+                        From -> % The process we consider to be a leader seems to be in elec1 stage. So we downgrade to it too
+                            NewE = startStage1(E, Server),
+                            safe_loop(Server, candidate, NewE,Msg);
+                        OtherLeader ->
+                            From ! {hasLeader,OtherLeader,T,self()},
+                            loop(Server,Role,E,Msg)
+                    end;
                 {hasLeader,_,_,_} ->
                     loop(Server,Role,E,Msg);
                 {isLeader,T,From} ->
