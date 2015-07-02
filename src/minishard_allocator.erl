@@ -19,6 +19,7 @@
 
 
 %% API
+-export([name/1]).
 -export([start_link/2, cluster_status/1]).
 -export([bind/1]).
 -export([get_manager/2, get_node/2]).
@@ -95,27 +96,32 @@
 -define(ets_shard_manager_pos, 3).
 -define(ets_shard_record(Shard, Node, Manager), {?ets_shard_key(Shard), Node, Manager}).
 
+%% Generate a process/ets name for a cluster name
+name(ClusterName) ->
+    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_allocator").
+
 %% API: Resolve a shard number to the shard manager pid
 get_manager(ClusterName, Shard) ->
-    ets:lookup_element(ClusterName, ?ets_shard_key(Shard), ?ets_shard_manager_pos).
+    ets:lookup_element(name(ClusterName), ?ets_shard_key(Shard), ?ets_shard_manager_pos).
 
 %% API: Resolve a shard number to the node currently hosting it
 get_node(ClusterName, Shard) ->
-    ets:lookup_element(ClusterName, ?ets_shard_key(Shard), ?ets_shard_node_pos).
+    ets:lookup_element(name(ClusterName), ?ets_shard_key(Shard), ?ets_shard_node_pos).
 
 %% API: start the allocator for given cluster
 start_link(ClusterName, CallbackMod) ->
     start_link(ClusterName, CallbackMod, #{}).
 
 start_link(ClusterName, CallbackMod, #{} = Hacks) when is_atom(ClusterName), is_atom(CallbackMod) ->
+    Name = name(ClusterName),
     Options = [{heartbeat, 5}, {bcast_type, all}, {seed_node, none}],
     State0 = #allocator{map = Map} = seed_state(ClusterName, CallbackMod, Hacks),
     Nodes = maps:keys(Map),
-    ?GEN_LEADER:start_link(ClusterName, Nodes, Options, ?MODULE, State0, []).
+    ?GEN_LEADER:start_link(Name, Nodes, Options, ?MODULE, State0, []).
 
 %% Test/debug API: set hacks for a running allocator
-set_hacks(Name, #{} = Hacks) when is_atom(Name) ->
-    ?GEN_LEADER:call(Name, {set_hacks, Hacks}).
+set_hacks(ClusterName, #{} = Hacks) when is_atom(ClusterName) ->
+    ?GEN_LEADER:call(name(ClusterName), {set_hacks, Hacks}).
 
 %% Seed state for a starting allocator
 seed_state(ClusterName, CallbackMod, Hacks) ->
@@ -123,7 +129,7 @@ seed_state(ClusterName, CallbackMod, Hacks) ->
     SeedMap = maps:from_list([{N, down} || N <- Nodes]),
     SeedManagers = maps:from_list([{N, undefined} || N <- Nodes]),
     #allocator{
-        name = ClusterName,
+        name = name(ClusterName),
         callback_mod = CallbackMod,
         shard_manager = undefined,
         my_status = idle,
@@ -135,7 +141,7 @@ seed_state(ClusterName, CallbackMod, Hacks) ->
 
 %% Register a shard manager ready to host a shard
 bind(ClusterName) ->
-    ?GEN_LEADER:call(ClusterName, {bind, self()}).
+    ?GEN_LEADER:call(name(ClusterName), {bind, self()}).
 
 %% Helper for possible asynchronous manager reply
 manager_reply(undefined, _) ->
@@ -146,7 +152,7 @@ manager_reply(From, Reply) ->
 
 %% Return cluster status in form {OverallStatusAtom, NodeStatusMap}
 cluster_status(ClusterName) when is_atom(ClusterName) ->
-    ?GEN_LEADER:call(ClusterName, cluster_status).
+    ?GEN_LEADER:call(name(ClusterName), cluster_status).
 
 %% Init: nothing special, we start with an empty map
 init(#allocator{name = Name} = State) ->
