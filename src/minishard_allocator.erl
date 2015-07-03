@@ -297,7 +297,7 @@ code_change(_OldVsn, #allocator{} = State, _Election, _Extra) ->
 
 
 %% When status request times out, we mark nodes which did not send their status update as idle
-handle_request_timeout(RequestRef, #allocator{map = Map, shard_count = ShardCount} = State) ->
+handle_request_timeout(RequestRef, #allocator{map = Map} = State) ->
     StalledNodes = maps:fold(fun
                 (Node, #request{ref = NodeRef}, Acc) when NodeRef == RequestRef ->
                     [Node|Acc];
@@ -308,14 +308,14 @@ handle_request_timeout(RequestRef, #allocator{map = Map, shard_count = ShardCoun
         [] ->
             unchanged;
         [_|_] ->
-            NewMap = reallocate(ShardCount, set_statuses(StalledNodes, idle, Map)),
-            {updated, install_new_map(NewMap, State)}
+            NewState = set_realloc_install(StalledNodes, idle, State),
+            {updated, NewState}
     end.
 
 
 %% The leader has been elected. He has Election from a gen_leader and an outdated map.
 %% Here we mark nodes going down as down and request a status from nodes going up
-handle_new_election(Election, #allocator{name = Name, map = Map, shard_count = ShardCount} = State) ->
+handle_new_election(Election, #allocator{name = Name, map = Map} = State) ->
     % Determine which nodes need a status request
     OldAlive = alive_nodes(State),
     Alive = ?GEN_LEADER:alive(Election),
@@ -328,18 +328,18 @@ handle_new_election(Election, #allocator{name = Name, map = Map, shard_count = S
 
     % Apply status changes
     MapMarkedDown = set_statuses(BecameDown, down, Map),
-    MapMarkedReq = case BecameAlive of
-        [] ->
-            MapMarkedDown;
+    StateDownMarked = lists:foldl(fun remove_manager/2, State#allocator{map = MapMarkedDown}, BecameDown),
+
+    AliveStatus = case BecameAlive of
+        [] -> % No status will be set, so here we may return any one
+            idle;
         [_|_] ->
             % Request statuses
             {Request, _Timer} = make_status_request(Name),
-            set_statuses(BecameAlive, Request, MapMarkedDown)
+            Request
     end,
 
-    StateManagersRemoved = lists:foldl(fun remove_manager/2, State, BecameDown),
-    NewMap = reallocate(ShardCount, MapMarkedReq),
-    install_new_map(NewMap, StateManagersRemoved).
+    set_realloc_install(BecameAlive, AliveStatus, StateDownMarked).
 
 -spec make_status_request(Name :: atom()) -> {#request{}, timer:tref()}.
 make_status_request(Name) ->
