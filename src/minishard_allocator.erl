@@ -6,6 +6,7 @@
 %%% Leader tracks the cluster status in a map. Each cluster node has a key in the map,
 %%% corresponding value is its status. Possible statuses are:
 %%%   * down            -- allocator on the node is down
+%%%   * #transition{}   -- allocator has recently went down, waiting for it to come back
 %%%   * #request{}      -- allocator is up, waiting for it to send its status
 %%%   * #conflict{}     -- allocator is up and hosts a conflicting shard. Waiting for it to send its score
 %%%   * idle            -- allocator is up, but shard manager has not been bound
@@ -67,12 +68,18 @@
         score :: minishard:score()              % Reported score
         }).
 
+%% Temporary state for nodes going down. Without this shard is reallocated even on interconnect socket reset
+-record(transition, {
+        shard   :: integer(),                   % Shard number just before disconnect
+        ref     :: reference()                  % transition reference
+        }).
+
 %% Active status
 -record(active, {
         shard :: integer()   % Active shard number
         }).
 
--type node_status() :: down | #request{} | #conflict{} | idle | standby | #active{}.
+-type node_status() :: down | #request{} | #conflict{} | #transition{} | idle | standby | #active{}.
 -type allocation_map() :: map(node(), node_status()).
 -type manager_map() :: map(node(), undefined | pid()).
 
@@ -272,6 +279,15 @@ handle_leader_cast(#score_report{ref = ReportRef, node = Node, score = Score}, #
             {ok, ResolvedState, ResolvedState}
     end;
 
+handle_leader_cast({transition_timeout, TransRef}, #allocator{name = Name} = State, _Election) ->
+    case handle_transition_timeout(TransRef, State) of
+        {updated, NewState} ->
+            error_logger:info_msg("Minishard allocator ~w *** LEADER *** transition ~w finished", [Name, TransRef]),
+            {ok, NewState, NewState};
+        unchanged ->
+            {noreply, State}
+    end;
+
 handle_leader_cast(Msg, #allocator{name = Name} = State, _Election) ->
     error_logger:warning_msg("Minishard allocator ~w got unexpected leader cast ~9999p", [Name, Msg]),
     {noreply, State}.
@@ -312,10 +328,25 @@ handle_request_timeout(RequestRef, #allocator{map = Map} = State) ->
             {updated, NewState}
     end.
 
+%% Transition timeout: here we mark nodes as really down
+handle_transition_timeout(TransRef, #allocator{map = Map} = State) ->
+    ReallyDownNodes = maps:fold(fun
+                (Node, #transition{ref = NodeRef}, Acc) when NodeRef == TransRef ->
+                    [Node|Acc];
+                (_Node, _Status, Acc) ->
+                    Acc
+            end, [], Map),
+    case ReallyDownNodes of
+        [] ->
+            unchanged;
+        [_|_] ->
+            NewState = set_realloc_install(ReallyDownNodes, down, State),
+            {updated, NewState}
+    end.
 
 %% The leader has been elected. He has Election from a gen_leader and an outdated map.
 %% Here we mark nodes going down as down and request a status from nodes going up
-handle_new_election(Election, #allocator{name = Name, map = Map} = State) ->
+handle_new_election(Election, #allocator{name = Name} = State) ->
     % Determine which nodes need a status request
     OldAlive = alive_nodes(State),
     Alive = ?GEN_LEADER:alive(Election),
@@ -327,8 +358,7 @@ handle_new_election(Election, #allocator{name = Name, map = Map} = State) ->
     BecameDown = Down -- OldDown,
 
     % Apply status changes
-    MapMarkedDown = set_statuses(BecameDown, down, Map),
-    StateDownMarked = lists:foldl(fun remove_manager/2, State#allocator{map = MapMarkedDown}, BecameDown),
+    StateDownMarked = lists:foldl(fun handle_node_down/2, State, BecameDown),
 
     AliveStatus = case BecameAlive of
         [] -> % No status will be set, so here we may return any one
@@ -341,6 +371,7 @@ handle_new_election(Election, #allocator{name = Name, map = Map} = State) ->
 
     set_realloc_install(BecameAlive, AliveStatus, StateDownMarked).
 
+
 -spec make_status_request(Name :: atom()) -> {#request{}, timer:tref()}.
 make_status_request(Name) ->
     % Set timer to handle possible troubles during status request
@@ -348,6 +379,21 @@ make_status_request(Name) ->
     Request = #request{ref = RequestRef},
     {ok, Timer} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {request_timeout, RequestRef}]),
     {Request, Timer}.
+
+-spec make_conflict_request(Name :: atom(), Shard :: integer()) -> {#conflict{}, timer:tref()}.
+make_conflict_request(Name, Shard) ->
+    CRef = make_ref(),
+    Conflict = #conflict{shard = Shard, ref = CRef, score = undefined},
+    {ok, Timer} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {conflict_timeout, CRef}]),
+    {Conflict, Timer}.
+
+-spec make_transition(Name :: atom(), Shard :: integer()) -> {#transition{}, timer:tref()}.
+make_transition(Name, Shard) ->
+    TransRef = make_ref(),
+    Request = #transition{ref = TransRef, shard = Shard},
+    {ok, Timer} = timer:apply_after(5000, ?GEN_LEADER, leader_cast, [Name, {transition_timeout, TransRef}]),
+    {Request, Timer}.
+
 
 %% Restart all running requests. When leader changes during request, response may be lost.
 %% So we search for all status and score requests, then generate new references for them, starting corresponding timers
@@ -373,6 +419,15 @@ restart_request(Node, #conflict{ref = OldRef, shard = Shard} = OldRequest, {Name
             OldRequest#conflict{ref = ExistingRef, score = undefined}
     end,
     restart_request_store(Name, Node, NewRequest, OldRef, NewRef, Map, RefMigration);
+restart_request(Node, #transition{ref = OldRef, shard = Shard} = OldRequest, {Name, Map, RefMigration}) ->
+    NewRequest = #transition{ref = NewRef} = case maps:get(OldRef, RefMigration, undefined) of
+        undefined ->
+            {NewRequest_, _} = make_transition(Name, Shard),
+            NewRequest_;
+        ExistingRef ->
+            OldRequest#transition{ref = ExistingRef}
+    end,
+    restart_request_store(Name, Node, NewRequest, OldRef, NewRef, Map, RefMigration);
 restart_request(Node, NotRequest, {Name, Map, RefMigration}) ->
     NewMap = maps:put(Node, NotRequest, Map),
     {Name, NewMap, RefMigration}.
@@ -383,6 +438,17 @@ restart_request_store(Name, Node, NewRequest, OldRef, NewRef, Map, RefMigration)
     {Name, NewMap, NewRefMigration}.
 
 
+handle_node_down(Node, #allocator{name = Name, map = Map} = State) ->
+    NewStatus = case get_allocation(Node, Map) of
+        #active{shard = Shard} ->
+            {Transition, _} = make_transition(Name, Shard),
+            Transition;
+        _ ->
+            down
+    end,
+
+    NewMap = set_statuses([Node], NewStatus, Map),
+    set_manager(Node, undefined, State#allocator{map = NewMap}).
 
 %% Remember node's bound manager
 -spec set_manager(Node :: node(), Manager :: undefined | pid(), #allocator{}) -> #allocator{}.
@@ -391,10 +457,6 @@ set_manager(Node, ShardManager, #allocator{managers = ManMap} = State) ->
     NewManMap = maps:update(Node, ShardManager, ManMap),
     State#allocator{managers = NewManMap}.
 
-%% manager map cleaner compatible with lists:foldl
--spec remove_manager(Node :: node(), #allocator{}) -> #allocator{}.
-remove_manager(Node, #allocator{} = State) ->
-    set_manager(Node, undefined, State).
 
 %% Set given status for a given list of nodes, reallocate shards, install the updated map
 -spec set_realloc_install(Nodes :: [node()], Status :: node_status(), #allocator{}) -> #allocator{}.
@@ -438,8 +500,6 @@ do_reallocate(ShardCount, #{} = Map) ->
 
 %% Install a new allocation map and perform all needed actions
 -spec install_new_map(Map :: allocation_map(), #allocator{}) -> #allocator{}.
-install_new_map(OldMap, #allocator{map = OldMap} = State) ->
-    State;
 install_new_map(NewMap, #allocator{name = Name} = State) ->
     error_logger:info_msg("Minishard allocator ~w: installing new map ~9999p", [Name, NewMap]),
     MyNewStatus = get_allocation(node(), NewMap),
@@ -541,14 +601,6 @@ handle_possible_conflicts(Node, Status, #allocator{} = State) ->
     set_realloc_install([Node], Status, State).
 
 
--spec make_conflict_request(Name :: atom(), Shard :: integer()) -> {#conflict{}, timer:tref()}.
-make_conflict_request(Name, Shard) ->
-    CRef = make_ref(),
-    Conflict = #conflict{shard = Shard, ref = CRef, score = undefined},
-    {ok, Timer} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {conflict_timeout, CRef}]),
-    {Conflict, Timer}.
-
-
 resolve_conflict(undefined, [], #allocator{} = State) ->
     % No conflict, pass
     State;
@@ -570,6 +622,7 @@ alive_nodes(#{} = Map) ->
     maps:fold(fun collect_alive/3, [], Map).
 
 collect_alive(_Node, down, Acc) -> Acc;
+collect_alive(_Node, #transition{}, Acc) -> Acc;
 collect_alive(Node, _, Acc) -> [Node|Acc].
 
 %% Helper: list nodes marked as down in a map
@@ -577,6 +630,7 @@ down_nodes(#allocator{map = Map}) ->
     maps:fold(fun collect_down/3, [], Map).
 
 collect_down(Node, down, Acc) -> [Node|Acc];
+collect_down(Node, #transition{}, Acc) -> [Node|Acc];
 collect_down(_Node, _, Acc) -> Acc.
 
 
@@ -591,6 +645,7 @@ shards_in_use(Map) ->
 %% Helper: add active and conflicting shards to the accumulator
 collect_shards_in_use(_Node, #active{shard = Shard}, Acc) -> [Shard|Acc];
 collect_shards_in_use(_Node, #conflict{shard = Shard}, Acc) -> [Shard|Acc];
+collect_shards_in_use(_Node, #transition{shard = Shard}, Acc) -> [Shard|Acc];
 collect_shards_in_use(_Node, _, Acc) -> Acc.
 
 %% Get a list of nodes pretending to host the shard
