@@ -414,12 +414,13 @@ set_statuses(Nodes, Status, Map) ->
 %% Perform shard allocation when possible
 -spec reallocate(ShardCount :: integer(), Map :: allocation_map()) -> allocation_map().
 reallocate(ShardCount, #{} = Map) when is_integer(ShardCount) ->
-    AllStatuses = maps:values(Map),
-    case lists:any(fun is_request/1, AllStatuses) of
-        true -> % Do not reallocate when there is active status request
-            Map;
-        false ->
-            do_reallocate(ShardCount, Map)
+    HaveQuorum = (length(alive_nodes(Map)) >= ShardCount),
+    HavePendingReq = lists:any(fun is_request/1, maps:values(Map)),
+    case {HaveQuorum, HavePendingReq} of
+        {true, false} -> % Require quorum and no status requests for reallocation
+            do_reallocate(ShardCount, Map);
+        {_, _} ->
+            Map
     end.
 
 do_reallocate(ShardCount, #{} = Map) ->
@@ -564,6 +565,8 @@ resolve_conflict(Shard, [_|_] = NodeScores, #allocator{map = Map} = State) ->
 
 %% Helper: list nodes marked as alive in a map
 alive_nodes(#allocator{map = Map}) ->
+    alive_nodes(Map);
+alive_nodes(#{} = Map) ->
     maps:fold(fun collect_alive/3, [], Map).
 
 collect_alive(_Node, down, Acc) -> Acc;
