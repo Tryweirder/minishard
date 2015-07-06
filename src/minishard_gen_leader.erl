@@ -504,7 +504,7 @@ init_it(Starter,Parent,Name,Mod,{UnsortedCandidateNodes,OptArgs,Arg},Options) ->
                          end,
             case lists:member(node(), Workers) of
                 true ->
-                    rpc:multicall(Candidates, gen_leader,
+                    rpc:multicall(Candidates, ?MODULE,
                                   worker_announce, [Name, node(self())]);
                 false -> nop
             end,
