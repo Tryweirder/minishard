@@ -121,10 +121,16 @@ start_link(ClusterName, CallbackMod) ->
 
 start_link(ClusterName, CallbackMod, #{} = Hacks) when is_atom(ClusterName), is_atom(CallbackMod) ->
     Name = name(ClusterName),
-    Options = [{heartbeat, 5}, {bcast_type, all}, {seed_node, none}],
     State0 = #allocator{map = Map} = seed_state(ClusterName, CallbackMod, Hacks),
     Nodes = maps:keys(Map),
+    Options = leader_worker_options(Nodes) ++ [{heartbeat, 5}, {bcast_type, all}, {seed_node, none}],
     ?GEN_LEADER:start_link(Name, Nodes, Options, ?MODULE, State0, []).
+
+leader_worker_options(Nodes) ->
+    case lists:member(node(), Nodes) of
+        true -> [];
+        false -> [{workers, [node()]}]
+    end.
 
 %% Test/debug API: set hacks for a running allocator
 set_hacks(ClusterName, #{} = Hacks) when is_atom(ClusterName) ->
@@ -133,13 +139,17 @@ set_hacks(ClusterName, #{} = Hacks) when is_atom(ClusterName) ->
 %% Seed state for a starting allocator
 seed_state(ClusterName, CallbackMod, Hacks) ->
     Nodes = CallbackMod:cluster_nodes(ClusterName),
+    MyStatus = case lists:member(node(), Nodes) of
+        true -> idle;
+        false -> worker
+    end,
     SeedMap = maps:from_list([{N, down} || N <- Nodes]),
     SeedManagers = maps:from_list([{N, undefined} || N <- Nodes]),
     #allocator{
         name = name(ClusterName),
         callback_mod = CallbackMod,
         shard_manager = undefined,
-        my_status = idle,
+        my_status = MyStatus,
         shard_count = CallbackMod:shard_count(ClusterName),
         map = SeedMap,
         managers = SeedManagers,
@@ -510,6 +520,9 @@ install_new_map(NewMap, #allocator{name = Name} = State) ->
 
 %% Leader has possibly changed our status. Let's see what we should do
 -spec handle_my_new_status(node_status(), #allocator{}) -> #allocator{}.
+handle_my_new_status(undefined, #allocator{my_status = worker} = State) ->
+    % I am worker, so my status is always worker, and I don't appear in a map
+    State;
 handle_my_new_status(OldStatus, #allocator{my_status = OldStatus} = State) ->
     % Unchanged, pass
     State;
