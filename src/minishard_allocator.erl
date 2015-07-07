@@ -21,7 +21,7 @@
 
 %% API
 -export([name/1]).
--export([start_link/2, cluster_status/1]).
+-export([start_link/2, cluster_status/1, shard_map/1]).
 -export([bind/1]).
 -export([get_manager/2, get_node/2]).
 
@@ -176,6 +176,12 @@ manager_reply(From, Reply) ->
 %% Return cluster status in form {OverallStatusAtom, NodeStatusMap}
 cluster_status(ClusterName) when is_atom(ClusterName) ->
     ?GEN_LEADER:call(name(ClusterName), cluster_status).
+
+%% Return shard allocation map
+-spec shard_map(ClusterName :: atom()) -> map(Shard :: integer(), node()).
+shard_map(ClusterName) ->
+    %ets:foldl(fun collect_shard_map/2, #{}, name(ClusterName)).
+    maps:from_list([{Shard, Node} || ?ETS_SHARD_RECORD(Shard, Node, _) <- ets:tab2list(name(ClusterName))]).
 
 %% Init: nothing special, we start with an empty map
 init(#allocator{name = Name} = State) ->
@@ -761,3 +767,9 @@ apply_hack(HackName, Hacks) ->
         Fun when is_function(Fun, 0) -> Fun();
         {M, F, A} when is_atom(M), is_atom(F), is_list(A) -> apply(M, F, A)
     end.
+
+
+%collect_shard_map(?ETS_SHARD_RECORD(Shard, Node, _), Map) ->
+%    maps:put(Shard, Node, Map);
+%collect_shard_map(_, Map) ->
+%    Map.

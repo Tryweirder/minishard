@@ -3,3 +3,6 @@ ebin
 .*.sw?
 .erlang.mk.*
 erl_crash.dump
+test/*.ebin
+.detest
+log
