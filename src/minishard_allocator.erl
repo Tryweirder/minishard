@@ -79,7 +79,11 @@
         shard :: integer()   % Active shard number
         }).
 
--type node_status() :: down | #request{} | #conflict{} | #transition{} | idle | standby | #active{}.
+-type request() :: #request{}.
+-type conflict() :: #conflict{}.
+-type transition() :: #transition{}.
+-type active() :: #active{}.
+-type node_status() :: down | request() | conflict() | transition() | idle | standby | active().
 -type allocation_map() :: map(node(), node_status()).
 -type manager_map() :: map(node(), undefined | pid()).
 
@@ -96,12 +100,14 @@
         hacks :: map(atom(), any())
         }).
 
+-type state() :: #allocator{}.
+
 
 %% ETS data model for shard information
--define(ets_shard_key(Shard), {shard, Shard}).
--define(ets_shard_node_pos, 2).
--define(ets_shard_manager_pos, 3).
--define(ets_shard_record(Shard, Node, Manager), {?ets_shard_key(Shard), Node, Manager}).
+-define(ETS_SHARD_KEY(Shard), {shard, Shard}).
+-define(ETS_SHARD_NODE_POS, 2).
+-define(ETS_SHARD_MANAGER_POS, 3).
+-define(ETS_SHARD_RECORD(Shard, Node, Manager), {?ETS_SHARD_KEY(Shard), Node, Manager}).
 
 %% Generate a process/ets name for a cluster name
 name(ClusterName) ->
@@ -109,11 +115,11 @@ name(ClusterName) ->
 
 %% API: Resolve a shard number to the shard manager pid
 get_manager(ClusterName, Shard) ->
-    ets:lookup_element(name(ClusterName), ?ets_shard_key(Shard), ?ets_shard_manager_pos).
+    ets:lookup_element(name(ClusterName), ?ETS_SHARD_KEY(Shard), ?ETS_SHARD_MANAGER_POS).
 
 %% API: Resolve a shard number to the node currently hosting it
 get_node(ClusterName, Shard) ->
-    ets:lookup_element(name(ClusterName), ?ets_shard_key(Shard), ?ets_shard_node_pos).
+    ets:lookup_element(name(ClusterName), ?ETS_SHARD_KEY(Shard), ?ETS_SHARD_NODE_POS).
 
 %% API: start the allocator for given cluster
 start_link(ClusterName, CallbackMod) ->
@@ -204,7 +210,7 @@ elected(#allocator{name = Name} = State, Election, Loser) ->
     StateRequestsRestarted = restart_requests(State),
     NewState = handle_new_election(Election, StateRequestsRestarted),
     {ok, NewState, NewState}.
-    
+
 
 %% Node goes down. Deallocate its shard and remove from pool
 handle_DOWN(Node, #allocator{name = Name} = State, Election) ->
@@ -254,8 +260,10 @@ handle_leader_cast({request_timeout, RequestRef}, #allocator{name = Name} = Stat
             {noreply, State}
     end;
 
-handle_leader_cast(#status_update{ref = RequestRef, node = Node, status = Status, manager = Manager}, #allocator{name = Name, map = Map} = State, _Election) ->
-    error_logger:info_msg("Minishard allocator ~w *** LEADER *** got a status update from ~w (~w)", [Name, Node, Status]),
+handle_leader_cast(#status_update{ref = RequestRef, node = Node, status = Status, manager = Manager},
+                   #allocator{name = Name, map = Map} = State, _Election) ->
+    error_logger:info_msg("Minishard allocator ~w *** LEADER *** got a status update from ~w (~w)",
+                          [Name, Node, Status]),
     case get_allocation(Node, Map) of
         #request{ref = RequestRef} ->
             StateWithManager = set_manager(Node, Manager, State),
@@ -267,11 +275,13 @@ handle_leader_cast(#status_update{ref = RequestRef, node = Node, status = Status
 
 handle_leader_cast({conflict_timeout, ConflictRef}, #allocator{name = Name, map = Map} = State, _Election) ->
     {Shard, NodeScores} = conflict_shard_and_scores(ConflictRef, Map),
-    Shard /= undefined andalso error_logger:info_msg("Minishard allocator ~w *** LEADER *** conflict ~w (shard ~w) timeout", [Name, ConflictRef, Shard]),
+    Shard /= undefined andalso error_logger:info_msg(
+        "Minishard allocator ~w *** LEADER *** conflict ~w (shard ~w) timeout", [Name, ConflictRef, Shard]),
     NewState = resolve_conflict(Shard, NodeScores, State),
     {ok, NewState, NewState};
 
-handle_leader_cast(#score_report{ref = ReportRef, node = Node, score = Score}, #allocator{name = Name, map = Map} = State, _Election) ->
+handle_leader_cast(#score_report{ref = ReportRef, node = Node, score = Score},
+                   #allocator{name = Name, map = Map} = State, _Election) ->
     error_logger:info_msg("Minishard allocator ~w *** LEADER *** got a score report from ~w (~w)", [Name, Node, Score]),
     NewMap = case get_allocation(Node, Map) of
         #conflict{ref = ReportRef} = Conflict ->
@@ -382,7 +392,7 @@ handle_new_election(Election, #allocator{name = Name} = State) ->
     set_realloc_install(BecameAlive, AliveStatus, StateDownMarked).
 
 
--spec make_status_request(Name :: atom()) -> {#request{}, timer:tref()}.
+-spec make_status_request(Name :: atom()) -> {request(), timer:tref()}.
 make_status_request(Name) ->
     % Set timer to handle possible troubles during status request
     RequestRef = make_ref(),
@@ -390,14 +400,14 @@ make_status_request(Name) ->
     {ok, Timer} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {request_timeout, RequestRef}]),
     {Request, Timer}.
 
--spec make_conflict_request(Name :: atom(), Shard :: integer()) -> {#conflict{}, timer:tref()}.
+-spec make_conflict_request(Name :: atom(), Shard :: integer()) -> {conflict(), timer:tref()}.
 make_conflict_request(Name, Shard) ->
     CRef = make_ref(),
     Conflict = #conflict{shard = Shard, ref = CRef, score = undefined},
     {ok, Timer} = timer:apply_after(2000, ?GEN_LEADER, leader_cast, [Name, {conflict_timeout, CRef}]),
     {Conflict, Timer}.
 
--spec make_transition(Name :: atom(), Shard :: integer()) -> {#transition{}, timer:tref()}.
+-spec make_transition(Name :: atom(), Shard :: integer()) -> {transition(), timer:tref()}.
 make_transition(Name, Shard) ->
     TransRef = make_ref(),
     Request = #transition{ref = TransRef, shard = Shard},
@@ -461,7 +471,7 @@ handle_node_down(Node, #allocator{name = Name, map = Map} = State) ->
     set_manager(Node, undefined, State#allocator{map = NewMap}).
 
 %% Remember node's bound manager
--spec set_manager(Node :: node(), Manager :: undefined | pid(), #allocator{}) -> #allocator{}.
+-spec set_manager(Node :: node(), Manager :: undefined | pid(), state()) -> state().
 set_manager(Node, ShardManager, #allocator{managers = ManMap} = State) ->
     true = maps:is_key(Node, ManMap),
     NewManMap = maps:update(Node, ShardManager, ManMap),
@@ -469,7 +479,7 @@ set_manager(Node, ShardManager, #allocator{managers = ManMap} = State) ->
 
 
 %% Set given status for a given list of nodes, reallocate shards, install the updated map
--spec set_realloc_install(Nodes :: [node()], Status :: node_status(), #allocator{}) -> #allocator{}.
+-spec set_realloc_install(Nodes :: [node()], Status :: node_status(), state()) -> state().
 set_realloc_install(Nodes, Status, #allocator{map = Map, shard_count = ShardCount} = State) ->
     MapUpdated = set_statuses(Nodes, Status, Map),
     NewMap = reallocate(ShardCount, MapUpdated),
@@ -509,7 +519,7 @@ do_reallocate(ShardCount, #{} = Map) ->
 
 
 %% Install a new allocation map and perform all needed actions
--spec install_new_map(Map :: allocation_map(), #allocator{}) -> #allocator{}.
+-spec install_new_map(Map :: allocation_map(), state()) -> state().
 install_new_map(NewMap, #allocator{name = Name} = State) ->
     error_logger:info_msg("Minishard allocator ~w: installing new map ~9999p", [Name, NewMap]),
     MyNewStatus = get_allocation(node(), NewMap),
@@ -519,7 +529,7 @@ install_new_map(NewMap, #allocator{name = Name} = State) ->
 
 
 %% Leader has possibly changed our status. Let's see what we should do
--spec handle_my_new_status(node_status(), #allocator{}) -> #allocator{}.
+-spec handle_my_new_status(node_status(), state()) -> state().
 handle_my_new_status(undefined, #allocator{my_status = worker} = State) ->
     % I am worker, so my status is always worker, and I don't appear in a map
     State;
@@ -529,7 +539,8 @@ handle_my_new_status(OldStatus, #allocator{my_status = OldStatus} = State) ->
 handle_my_new_status(#request{ref = Ref}, #allocator{last_response = Ref} = State) ->
     % We have already sent a status update for this request
     State;
-handle_my_new_status(#request{ref = Ref}, #allocator{name = Name, my_status = MyStatus, shard_manager = Manager, hacks = Hacks} = State) ->
+handle_my_new_status(#request{ref = Ref}, #allocator{
+                name = Name, my_status = MyStatus, shard_manager = Manager, hacks = Hacks} = State) ->
     apply_hack(on_status_request, Hacks),
     % New status request. Send an update and wait
     Report = #status_update{ref = Ref, node = node(), status = MyStatus, manager = Manager},
@@ -582,12 +593,12 @@ collect_active_shards(_Node, _Status, ShardNodeMap) ->
 
 export_shard_info(Shard, Node, {Name, ManagerMap}) ->
     Manager = maps:get(Node, ManagerMap, undefined),
-    true = ets:insert(Name, ?ets_shard_record(Shard, Node, Manager)),
+    true = ets:insert(Name, ?ETS_SHARD_RECORD(Shard, Node, Manager)),
     {Name, ManagerMap}.
 
 
 %% Set shard manager status when leader updates it
--spec set_manager_status(Manager :: undefined | pid(), Status :: idle | standby | #active{}) -> ok.
+-spec set_manager_status(Manager :: undefined | pid(), Status :: idle | standby | active()) -> ok.
 set_manager_status(undefined, _Status) -> % No manager, pass
     ok;
 set_manager_status(Manager, Status) ->
@@ -599,8 +610,9 @@ node_status_for_manager(#active{shard = Shard}) -> {active, Shard}.
 
 
 %% A node has sent a valid status update. We should check the updated map for conflicts and maybe start resolution
--spec handle_possible_conflicts(Node :: node(), Status :: node_status(), #allocator{}) -> #allocator{}.
-handle_possible_conflicts(Node, #active{shard = Shard} = Status, #allocator{name = Name, map = Map, hacks = Hacks} = State) ->
+-spec handle_possible_conflicts(Node :: node(), Status :: node_status(), state()) -> state().
+handle_possible_conflicts(Node, #active{shard = Shard} = Status,
+                          #allocator{name = Name, map = Map, hacks = Hacks} = State) ->
     case shard_nodes(Shard, Map) of
         [] -> % no other candidates for this shard
             set_realloc_install([Node], Status, State);
@@ -714,13 +726,20 @@ make_cluster_status(#allocator{shard_count = ShardCount, map = NodeMap} = State,
     ShardNodeMap = shard_node_map(State),
     NodeStatusMap = maps:fold(fun allocation_to_node_status/3, ExportNodeMap, ShardNodeMap),
     AllocatedShardCnt = length(lists:filter(fun(N) -> N /= undefined end, maps:values(ShardNodeMap))),
-    OverallStatus = if
-        AllocatedShardCnt == ShardCount -> available;
-        AliveNodesCnt < ShardCount -> degraded;
-        AllocatedShardCnt < AliveNodesCnt -> allocation_pending;
-        true -> transition
-    end,
-    {OverallStatus, #{shards => {ShardCount, AllocatedShardCnt}, nodes => {TotalNodeCnt, AliveNodesCnt}}, NodeStatusMap}.
+    OverallStatus = overall_status(ShardCount, AllocatedShardCnt, AliveNodesCnt),
+
+    Counts = #{shards => {ShardCount, AllocatedShardCnt}, nodes => {TotalNodeCnt, AliveNodesCnt}},
+    {OverallStatus, Counts, NodeStatusMap}.
+
+-spec overall_status(ShardCount :: integer(), AllocatedShardCount :: integer(), AliveNodesCount :: integer()) -> atom().
+overall_status(ShardCount, ShardCount, _AliveNodesCnt) ->
+    available;
+overall_status(ShardCount, _AllocCnt, AliveNodesCnt) when AliveNodesCnt < ShardCount ->
+    degraded;
+overall_status(_ShardCount, AllocatedShardCnt, AliveNodesCnt) when AllocatedShardCnt < AliveNodesCnt ->
+    allocation_pending;
+overall_status(_ShardCount, _AllocatedShardCnt, _AliveNodesCount) ->
+    transition.
 
 allocation_to_node_status(ShardNum, undefined, NodeStatuses) ->
     maps:put({not_allocated, ShardNum}, undefined, NodeStatuses);

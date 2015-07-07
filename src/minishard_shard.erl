@@ -86,7 +86,8 @@ handle_info(Unexpected, #shard{cluster_name = ClusterName} = State) ->
     {noreply, State}.
 
 
-handle_call(score, _From, #shard{status = active, callback_mod = CallbackMod, callback_state = CallbackState} = State) ->
+handle_call(score, _From, #shard{status = active,
+                                 callback_mod = CallbackMod, callback_state = CallbackState} = State) ->
     Score = CallbackMod:score(CallbackState),
     {reply, Score, State};
 
@@ -150,7 +151,6 @@ handle_ownership_recheck(#shard{status = active, cluster_name = ClusterName, my_
 handle_ownership_recheck(#shard{} = State) ->
     {noreply, State}.
 
-    
 
 %%%
 %%% Internals
@@ -231,12 +231,11 @@ callback_deallocate(Winner, #shard{callback_mod = CallbackMod, callback_state = 
 %% We perform score getting in separate process to ensure allocator does not get garbage messages
 get_score_or_kill(ShardPid) ->
     ScoreGetResult = rpc:call(node(), gen_server, call, [ShardPid, score, 1000]),
-    if
-        is_number(ScoreGetResult) ->
-            ScoreGetResult;
-        true ->
-            % We don't care what exactly goes wrong, we just kill it
-            exit(ShardPid, kill),
-            undefined
-    end.
+    handle_score_result(ShardPid, ScoreGetResult).
 
+handle_score_result(_Pid, Score) when is_number(Score) ->
+    Score;
+handle_score_result(ShardPid, _) ->
+    % We don't care what exactly goes wrong, we just kill it
+    exit(ShardPid, kill),
+    undefined.

@@ -7,7 +7,7 @@
 % Generate fake node list by changing a number in local node name
 cluster_nodes(_) ->
     BinNode = atom_to_binary(node(), latin1),
-    [make_node(BinNode, N) || N <- lists:seq(1,5)].
+    [make_node(BinNode, N) || N <- lists:seq(1, 5)].
 
 % Shard count, needed to monitor cluster for degrades
 shard_count(_) ->
@@ -30,12 +30,14 @@ score(#demo{alloc_time = AllocTime}) ->
     timer:now_diff(os:timestamp(), AllocTime) div 10000000.
 
 prolonged(Loser, #demo{name = Cluster, num = Num} = State) ->
-    error_logger:info_msg("Wheeeeeee!!! We still own minishard cluster ~w shard #~w, and ~w at ~w is loser!", [Cluster, Num, Loser, node(Loser)]),
+    error_logger:info_msg("Wheeeeeee!!! We still own minishard cluster ~w shard #~w, and ~w at ~w is loser!",
+                          [Cluster, Num, Loser, node(Loser)]),
     {ok, State}.
 
 deallocated(undefined, #demo{name = Cluster, num = Num}) ->
     error_logger:info_msg("Bad news: minishard cluster ~w has degraded, so we lose the shard #~w :(", [Cluster, Num]),
     ok;
 deallocated(Winner, #demo{name = Cluster, num = Num}) ->
-    error_logger:info_msg("Bad news: ~w at ~w has won the competition for minishard cluster ~w shard #~w :(", [Winner, node(Winner), Cluster, Num]),
+    error_logger:info_msg("Bad news: ~w at ~w has won the competition for minishard cluster ~w shard #~w :(",
+                          [Winner, node(Winner), Cluster, Num]),
     ok.
