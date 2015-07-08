@@ -13,7 +13,8 @@ start(Name) ->
     application:ensure_all_started(lager),
     application:ensure_all_started(minishard),
     %error_logger:info_msg("Minishard config: ~120p~n", [application:get_all_env(minishard)]),
-    minishard:join(Name, ?MODULE).
+    {ok, _} = minishard:join(Name, ?MODULE),
+    ok.
 
 
 map() ->
