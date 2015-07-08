@@ -431,6 +431,7 @@ init_it(Starter,Parent,Name,Mod,{UnsortedCandidateNodes,OptArgs,Arg},Options) ->
     Seed        = proplists:get_value(seed,      OptArgs, none),
     Debug       = debug_options(Name, Options),
     CandidateNodes = lists:sort(UnsortedCandidateNodes),
+    [spawn_link(net_adm, ping, [Node]) || Node <- CandidateNodes], timer:sleep(1000),
     AmCandidate = case lists:member(node(), CandidateNodes) of
                       true -> true;
                       false ->
