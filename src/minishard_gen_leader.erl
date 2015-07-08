@@ -86,6 +86,7 @@
 
 %% Internal exports
 -export([real_loop/4, real_safe_loop/4, real_mon_loop/2]).
+-export([init_ping_loop/2, ping_loop/3]).
 -export([init_it/6,
          print_event/3,
          send_checkleads/4
@@ -166,6 +167,7 @@
           parent,
           mod,
           state,
+          pinger_proc = spawn_pinger_proc(),
           monitor_proc = spawn_monitor_proc(),
 	  debug :: [sys:dbg_opt()]
          }).
@@ -681,8 +683,10 @@ real_safe_loop(#server{mod = Mod, state = State} = Server, Role,
         {heartbeat, _Node} = Msg ->
             safe_loop(Server,Role,E,Msg);
         {candidate_timer} = Msg ->
+            Down = E#election.down,
+            Server#server.pinger_proc ! {set_ping_nodes, Down},
             NewE =
-                case E#election.down of
+                case Down of
                     [] ->
                         timer:cancel(E#election.cand_timer),
                         E#election{cand_timer = undefined};
@@ -692,7 +696,7 @@ real_safe_loop(#server{mod = Mod, state = State} = Server, Role,
                         %% Some of potential master candidate nodes are down.
                         %% Try to wake them up
                         F = fun(N) ->
-                                    {E#election.name, N} ! {heartbeat, node()}
+                                erlang:send({E#election.name, N}, {heartbeat, node()}, [nosuspend, noconnect])
                             end,
                         [F(N) || N <- Down, {ok, up} =/= net_kernel:node_info(N, state)],
                         E
@@ -1549,10 +1553,8 @@ mon_node(E,Proc,Server) when is_pid(Proc) ->
 
 spawn_monitor_proc() ->
     Parent = self(),
-    proc_lib:spawn_link(
-      fun() ->
-              mon_loop(Parent, [])
-      end).
+    proc_lib:spawn_link(?MODULE, real_mon_loop, [Parent, []]).
+
 
 do_monitor(Proc, #server{monitor_proc = P}) ->
     P ! {self(), {monitor, Proc}},
@@ -1606,6 +1608,38 @@ mon_handle_down(Ref, Parent, Refs) ->
 
 mon_reply(From, Reply) ->
     From ! {mon_reply, Reply}.
+
+
+spawn_pinger_proc() ->
+    Parent = self(),
+    proc_lib:spawn_link(?MODULE, init_ping_loop, [Parent, []]).
+
+init_ping_loop(Parent, NodesToPing) ->
+    ping_loop(Parent, set_ping_timer(0), NodesToPing).
+
+set_ping_timer(Timeout) ->
+    erlang:start_timer(Timeout, self(), {do_ping}).
+
+%% To avoid leader blocking on message send, we ping nodes here,
+%% and leader sends messages to down nodes with [nosuspend, noconnect]
+ping_loop(Parent, TRef, NodesToPing) ->
+    receive
+        code_reloaded ->
+            ?MODULE:ping_loop(Parent, TRef, NodesToPing);
+        {set_ping_nodes, NewNodesToPing} ->
+            init_ping_loop(Parent, NewNodesToPing);
+        {timeout, TRef, _} ->
+            NewTRef = set_ping_timer(1000),
+            [net_adm:ping(Node) || Node <- NodesToPing],
+            ?MODULE:ping_loop(Parent, NewTRef, NodesToPing);
+        {timeout, _, _} ->
+            ?MODULE:ping_loop(Parent, TRef, NodesToPing);
+        Msg ->
+            io:fwrite("ping_loop with parent: ~p nodes: ~p received: ~p~n", [Parent, NodesToPing, Msg]),
+            ?MODULE:ping_loop(Parent, TRef, NodesToPing)
+    end.
+
+
 
 %% the heartbeat messages sent to the downed nodes when the candicate_timer
 %% message is received can take a very long time in the case of a partitioned
