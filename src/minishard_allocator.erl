@@ -164,7 +164,7 @@ seed_state(ClusterName, CallbackMod, Hacks) ->
 
 %% Register a shard manager ready to host a shard
 bind(ClusterName) ->
-    ?GEN_LEADER:call(name(ClusterName), {bind, self()}).
+    ?GEN_LEADER:call(name(ClusterName), {bind, self()}, 120000).
 
 %% Helper for possible asynchronous manager reply
 manager_reply(undefined, _) ->
@@ -186,6 +186,7 @@ shard_map(ClusterName) ->
 %% Init: nothing special, we start with an empty map
 init(#allocator{name = Name} = State) ->
     Name = ets:new(Name, [protected, named_table, set, {read_concurrency, true}]),
+    ok = export_shard_map(State),
     {ok, State}.
 
 
