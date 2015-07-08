@@ -1517,6 +1517,7 @@ call_elected(Mod, State, E, From) when is_pid(From) ->
 
 %% Start monitor a bunch of candidate nodes
 mon_nodes(E,Nodes,Server) ->
+    Server#server.pinger_proc ! {set_ping_nodes, Nodes},
     E1 =
         case E#election.cand_timer of
             undefined ->
@@ -1529,7 +1530,7 @@ mon_nodes(E,Nodes,Server) ->
     lists:foldl(
       fun(ToNode,El) ->
               Pid  = {El#election.name, ToNode},
-              Pid ! {heartbeat, FromNode},
+              erlang:send(Pid, {heartbeat, FromNode}, [nosuspend, noconnect]),
               mon_node(El, Pid, Server)
       end,E1,Nodes -- [node()]).
 
