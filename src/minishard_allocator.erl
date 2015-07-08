@@ -26,7 +26,7 @@
 -export([get_manager/2, get_node/2]).
 
 %% Testing/debugging
--export([set_hacks/2]).
+-export([seed_state/3, set_hacks/2]).
 
 %% gen_leader callbacks
 -export([
