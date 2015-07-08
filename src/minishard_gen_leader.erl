@@ -964,12 +964,12 @@ real_loop(#server{parent = Parent,
                             lists:foreach(
                               fun(N) ->
                                       Elid = E#election.elid,
-                                      {Name,N} ! {normQ,Elid,self()}
+                                      erlang:send({Name,N}, {normQ,Elid,self()}, [nosuspend, noconnect])
                               end,Candidates),
                             lists:foreach(
                               fun(N) ->
                                       Elid = E#election.elid,
-                                      {Name,N} ! {workerAlive,Elid,self()}
+                                      erlang:send({Name,N}, {workerAlive,Elid,self()}, [nosuspend, noconnect])
                               end,E#election.work_down);
                         false ->
                             ok
@@ -1376,7 +1376,7 @@ continStage2(E, Server) ->
         true ->
             Pendack = next(E#election.pendack,E#election.candidate_nodes),
             NewE = mon_nodes(E, [Pendack], Server),
-            {E#election.name,Pendack} ! {halt,E#election.elid,self()},
+            erlang:send({E#election.name,Pendack}, {halt,E#election.elid,self()}, [nosuspend, noconnect]),
             NewE#election{pendack = Pendack};
         false ->
             %% I am the leader
