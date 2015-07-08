@@ -46,7 +46,7 @@ run(Param) ->
 
     kill_standby_nodes_test(test, Nodes, MST_Config, 10),
 
-    timer:sleep(50000),
+    kill_leader_test(test, Nodes, MST_Config, 10),
 
     ok.
 
@@ -134,7 +134,29 @@ kill_standby_nodes_test(Name, Nodes, MST_Config, Iterations) ->
     kill_standby_nodes_test(Name, Nodes, MST_Config, Iterations - 1).
 
 
+kill_leader_test(_Name, _Nodes, _Config, 0) ->
+    ok;
+kill_leader_test(Name, Nodes, MST_Config, Iterations) ->
+    SeenLeaders = multicall(Nodes, minishard_allocator, leader, [Name]),
+    [{_, Leader}] = lists:ukeysort(2, SeenLeaders),
+    RemainingNodes = Nodes -- [Leader],
 
+    lager:info("kill_leader_test: (~w iters left) killing ~120p", [Iterations, Leader]),
+    detest:stop_node(Leader),
+
+    timer:sleep(1200),
+    Map0 = get_validate_map(RemainingNodes, allocated),
+    NewSeenLeaders = multicall(RemainingNodes, minishard_allocator, leader, [Name]),
+    [{_, _NewLeader}] = lists:ukeysort(2, NewSeenLeaders),
+
+    lager:info("kill_leader_test: (~w iters left) starting back ~120p", [Iterations, Leader]),
+    detest:add_node(node_spec(Leader)),
+    configure_and_start(Name, [Leader], MST_Config),
+
+    timer:sleep(1200), % Let the leader allocate all shards
+    Map0 = get_validate_map(RemainingNodes, allocated),
+
+    kill_leader_test(Name, Nodes, MST_Config, Iterations - 1).
 
 node_spec(Node) when is_atom(Node) ->
     {ok, [N], "@" ++ _} = io_lib:fread("mst_~d", atom_to_list(Node)),

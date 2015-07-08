@@ -26,7 +26,7 @@
 -export([get_manager/2, get_node/2]).
 
 %% Testing/debugging
--export([seed_state/3, set_hacks/2]).
+-export([seed_state/3, set_hacks/2, leader/1]).
 
 %% gen_leader callbacks
 -export([
@@ -177,6 +177,10 @@ manager_reply(From, Reply) ->
 cluster_status(ClusterName) when is_atom(ClusterName) ->
     ?GEN_LEADER:call(name(ClusterName), cluster_status).
 
+%% Return current leader node
+leader(ClusterName) when is_atom(ClusterName) ->
+    ?GEN_LEADER:call(name(ClusterName), get_leader).
+
 %% Return shard allocation map
 -spec shard_map(ClusterName :: atom()) -> map(Shard :: integer(), node()).
 shard_map(ClusterName) ->
@@ -204,6 +208,8 @@ handle_call({bind, ShardManager}, _From, #allocator{name = Name} = State, _Elect
     {reply, standby, NewState};
 handle_call(cluster_status, _From, #allocator{} = State, Election) ->
     {reply, make_cluster_status(State, Election), State};
+handle_call(get_leader, _From, #allocator{} = State, Election) ->
+    {reply, ?GEN_LEADER:leader_node(Election), State};
 handle_call({set_hacks, Hacks}, _From, #allocator{} = State, _Election) ->
     {reply, ok, State#allocator{hacks = Hacks}};
 handle_call(_Request, _From, #allocator{} = State, _Election) ->
