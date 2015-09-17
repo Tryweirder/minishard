@@ -5,14 +5,13 @@
 -export([join_cluster/2, get_pid/2]).
 -export([init/1]).
 
+%% For embedding minishard cluster in any supervision tree
+-export([cluster_child_spec/2, cluster_internal_specs/2]).
+
 sup_name(root) ->
     minishard;
 sup_name({cluster, ClusterName, _}) ->
-    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_sup");
-sup_name({pingers, ClusterName}) ->
-    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_pingers");
-sup_name({pinger_guard, ClusterName, Node, _}) ->
-    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_pguard_" ++ atom_to_list(Node)).
+    list_to_atom("minishard_" ++ atom_to_list(ClusterName) ++ "_sup").
 
 % Helper: get pid of started infrastructure part
 get_pid(undefined, _) ->
@@ -35,11 +34,27 @@ strict_whereis(ProcessName) when is_atom(ProcessName) ->
 start_link(Arg) ->
     supervisor:start_link({local, sup_name(Arg)}, ?MODULE, Arg).
 
-join_cluster(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(CallbackMod) ->
-    ClusterSpec = {ClusterName,
-                   {?MODULE, start_link, [{cluster, ClusterName, CallbackMod}]},
-                   permanent, 10000, supervisor, []},
-    supervisor:start_child(sup_name(root), ClusterSpec).
+cluster_child_spec(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(CallbackMod) ->
+    {ClusterName,
+     {?MODULE, start_link, [{cluster, ClusterName, CallbackMod}]},
+     permanent, 10000, supervisor, []}.
+
+allocator_spec(ClusterName, CallbackMod) ->
+    {allocator,
+     {minishard_allocator, start_link, [ClusterName, CallbackMod]},
+     permanent, 1000, worker, [minishard_allocator]}.
+
+shard_spec(ClusterName, CallbackMod) ->
+    {shard,
+     {minishard_shard, start_link, [ClusterName, CallbackMod]},
+     permanent, 1000, worker, [minishard_shard]}.
+
+cluster_internal_specs(ClusterName, CallbackMod) when is_atom(ClusterName), is_atom(CallbackMod) ->
+    [allocator_spec(ClusterName, CallbackMod), shard_spec(ClusterName, CallbackMod)].
+
+
+join_cluster(ClusterName, CallbackMod) ->
+    supervisor:start_child(sup_name(root), cluster_child_spec(ClusterName, CallbackMod)).
 
 
 
@@ -47,11 +62,4 @@ init(root) ->
     {ok, {{one_for_one, 1, 5}, []}};
 
 init({cluster, ClusterName, CallbackMod}) ->
-    AllocatorSpec = {allocator,
-                     {minishard_allocator, start_link, [ClusterName, CallbackMod]},
-                     permanent, 1000, worker, [minishard_allocator]},
-    ShardSpec = {shard,
-                 {minishard_shard, start_link, [ClusterName, CallbackMod]},
-                   permanent, 1000, worker, [minishard_shard]},
-
-    {ok, {{one_for_all, 5, 10}, [AllocatorSpec, ShardSpec]}}.
+    {ok, {{one_for_all, 5, 10}, cluster_internal_specs(ClusterName, CallbackMod)}}.
