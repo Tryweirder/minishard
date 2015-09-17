@@ -84,8 +84,8 @@
 -type transition() :: #transition{}.
 -type active() :: #active{}.
 -type node_status() :: down | request() | conflict() | transition() | idle | standby | active().
--type allocation_map() :: map(node(), node_status()).
--type manager_map() :: map(node(), undefined | pid()).
+-type allocation_map() :: #{node() => node_status()}.
+-type manager_map() :: #{node() => undefined | pid()}.
 
 %% gen_leader callback state
 -record(allocator, {
@@ -97,7 +97,7 @@
         shard_count :: integer(),
         map :: allocation_map(),
         managers :: manager_map(),
-        hacks :: map(atom(), any())
+        hacks :: #{atom() => any()}
         }).
 
 -type state() :: #allocator{}.
@@ -182,7 +182,7 @@ leader(ClusterName) when is_atom(ClusterName) ->
     ?GEN_LEADER:call(name(ClusterName), get_leader).
 
 %% Return shard allocation map
--spec shard_map(ClusterName :: atom()) -> map(Shard :: integer(), node()).
+-spec shard_map(ClusterName :: atom()) -> #{Shard :: integer() => node()}.
 shard_map(ClusterName) ->
     %ets:foldl(fun collect_shard_map/2, #{}, name(ClusterName)).
     maps:from_list([{Shard, Node} || ?ETS_SHARD_RECORD(Shard, Node, _) <- ets:tab2list(name(ClusterName))]).
