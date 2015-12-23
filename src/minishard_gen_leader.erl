@@ -702,7 +702,7 @@ real_safe_loop(#server{mod = Mod, state = State} = Server, Role,
                         [F(N) || N <- Down, {ok, up} =/= net_kernel:node_info(N, state)],
                         E
                 end,
-            safe_loop(Server,Role,NewE,Msg);
+            safe_loop(Server,Role,halt_pendack(NewE),Msg);
         {checklead, Node} = Msg ->
             %% in the very exceptional case when a candidate comes up when the
             %% elected leader is *behind* it in the candidate list *and* all nodes
@@ -1377,8 +1377,7 @@ continStage2(E, Server) ->
         true ->
             Pendack = next(E#election.pendack,E#election.candidate_nodes),
             NewE = mon_nodes(E, [Pendack], Server),
-            erlang:send({E#election.name,Pendack}, {halt,E#election.elid,self()}, [nosuspend, noconnect]),
-            NewE#election{pendack = Pendack};
+            halt_pendack(NewE#election{pendack = Pendack});
         false ->
             %% I am the leader
             E#election{leader = self(),
@@ -1386,6 +1385,12 @@ continStage2(E, Server) ->
                        previous_leader = E#election.leader,
                        status = norm}
     end.
+
+halt_pendack(#election{pendack = undefined} = E) ->
+    E;
+halt_pendack(#election{name = Name, elid = ElId, pendack = Pendack} = E) ->
+    erlang:send({Name, Pendack}, {halt, ElId, self()}, [nosuspend, noconnect]),
+    E.
 
 %% corresponds to Halting
 halting(E,T,From,Server) ->
