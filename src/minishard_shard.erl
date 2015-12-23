@@ -78,7 +78,11 @@ init(#shard{} = State) ->
 handle_info(timeout, #shard{status = starting} = State0) ->
     {noreply, join_cluster(State0#shard{status = idle})};
 
-handle_info({timeout, Timer, recheck_ownership}, #shard{recheck_timer = Timer} = State) ->
+handle_info({timeout, Timer, recheck_ownership}, #shard{recheck_timer = Timer, cluster_name = ClusterName} = State) ->
+    % Ensure our allocator feels OK and responds to calls (did not stall)
+    _ = minishard_allocator:leader(ClusterName),
+    % OK, we did not crash, so allocator is running.
+    % Now let's see if we missed deallocation
     handle_ownership_recheck(State#shard{recheck_timer = undefined});
 
 handle_info(Unexpected, #shard{cluster_name = ClusterName} = State) ->
