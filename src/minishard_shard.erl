@@ -76,7 +76,7 @@ init(#shard{} = State) ->
 
 %% Initial status discovery. Later watcher will notify us about status changes
 handle_info(timeout, #shard{status = starting} = State0) ->
-    {noreply, join_cluster(State0#shard{status = idle})};
+    {noreply, schedule_recheck(join_cluster(State0#shard{status = idle}))};
 
 handle_info({timeout, Timer, recheck_ownership}, #shard{recheck_timer = Timer, cluster_name = ClusterName} = State) ->
     % Ensure our allocator feels OK and responds to calls (did not stall)
@@ -143,17 +143,18 @@ handle_allocation(cancel, Winner, #shard{} = State) ->
 
 
 %% Shard ownership recheck
-handle_ownership_recheck(#shard{status = active, cluster_name = ClusterName, my_number = MyNum} = State) ->
+handle_ownership_recheck(#shard{status = active, cluster_name = ClusterName, my_number = MyNum} = State0) ->
     Owner = minishard:get_manager(ClusterName, MyNum),
+    State = schedule_recheck(State0),
     case (Owner == self()) of
         true -> % OK, we still own the shard
-            {noreply, schedule_recheck(State)};
+            {noreply, State};
         false -> %% Oops...
             error_logger:error_msg("Minishard: cluster ~w shard #~w ownership lost!", [ClusterName, MyNum]),
             handle_allocation(cancel, undefined, State)
     end;
 handle_ownership_recheck(#shard{} = State) ->
-    {noreply, State}.
+    {noreply, schedule_recheck(State)}.
 
 
 %%%
@@ -190,8 +191,7 @@ join_cluster(#shard{status = idle, cluster_name = ClusterName} = State) ->
 %% Perform all activation stuff when we capture a shard number
 activate(MyNumber, #shard{} = State) ->
     Allocated = callback_allocate(State#shard{status = active, my_number = MyNumber}),
-    RecheckScheduled = schedule_recheck(Allocated),
-    export_status(RecheckScheduled).
+    export_status(Allocated).
 
 
 %% Leave degraded cluster
