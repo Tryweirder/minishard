@@ -1,7 +1,8 @@
 deps/*
 ebin
 .*.sw?
-.erlang.mk.*
+.erlang.mk*
+*.d
 erl_crash.dump
 test/*.ebin
 .detest
