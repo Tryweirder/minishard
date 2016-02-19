@@ -20,6 +20,7 @@
 %%% @author Thomas Arts <thomas.arts@ituniv.se>
 %%% @author Ulf Wiger <ulf.wiger@ericsson.com>
 %%% @author (contributor: Serge Aleynikov <saleyn@gmail.com>)
+%%% @author (contributor: Danil Zagoskin <z@gosk.in>)
 %%%
 %%% @doc Leader election behavior.
 %%% <p>This application implements a leader election behavior modeled after
@@ -53,6 +54,17 @@
 %%%     can be used in the behavior's implementation</li>
 %%% <li>Rewrote implementation of the tau timer to prevent the leader
 %%%     looping on the timer timeout event when all candidates are connected.</li>
+%%% </ol>
+%%% </p>
+%%% <p>
+%%% Modifications done by Danil Zagoskin:
+%%% <ol>
+%%% <li>Renamed gen_leader to minishard_gen_leader to avoid name clashes</li>
+%%% <li>Timestamp is used as incarnation value to avoid disk access</li>
+%%% <li>Made initial discovery messages sending fast and unreliable.
+%%%     This prevents blocking on start.</li>
+%%% <li>Added node pinger so that cluster recovers after network problems</li>
+%%% <li>Handled some corner cases which may appear during network problems</li>
 %%% </ol>
 %%% </p>
 %%% @end
